@@ -1,0 +1,1 @@
+# Client 只用 Python 標準庫，無需安裝任何套件 (Python 3.9+)。

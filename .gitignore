@@ -1,0 +1,12 @@
+# secrets / local state
+.env
+*.db
+*.db-journal
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# 舊的扁平版殘留 (已改成 bot/ + client/)
+/ks.db
