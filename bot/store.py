@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     thread_id  INTEGER,
     forum_id   INTEGER
 );
+CREATE TABLE IF NOT EXISTS kv (
+    k TEXT PRIMARY KEY,
+    v TEXT
+);
 """
 
 
@@ -60,6 +64,18 @@ class Store:
             "ON CONFLICT(session_id) DO UPDATE SET thread_id = excluded.thread_id, "
             "forum_id = excluded.forum_id",
             (session_id, thread_id, forum_id),
+        )
+        self.db.commit()
+
+    def get_kv(self, k: str) -> Optional[str]:
+        row = self.db.execute("SELECT v FROM kv WHERE k = ?", (k,)).fetchone()
+        return row["v"] if row else None
+
+    def set_kv(self, k: str, v: str) -> None:
+        self.db.execute(
+            "INSERT INTO kv(k, v) VALUES(?, ?) "
+            "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            (k, v),
         )
         self.db.commit()
 
