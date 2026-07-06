@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import io
 import json
 import re
 from pathlib import Path
@@ -155,10 +156,20 @@ class KiroBot(discord.Client):
         print(f"[bot] 監聽 ingest 頻道 {self.ingest_id}")
         self.command_id = await self._resolve_channel(
             "command_channel_id", self.cfg.get("command_channel_id"),
-            "kiro-command", "KiroSync 狀態與指令頻道 (webhook URL 請用 /webhook 取得)",
+            "kiro-command", "KiroSync 狀態與指令頻道",
             public=True,
         )
         print(f"[bot] command 頻道 {self.command_id}")
+        # 確保 command 頻道 (即使是既有的) 開放 @everyone 檢視 + 發言
+        if self.command_id:
+            ch = self.get_channel(self.command_id) or await self._fetch(self.command_id)
+            if isinstance(ch, discord.TextChannel):
+                try:
+                    await ch.set_permissions(
+                        ch.guild.default_role, view_channel=True, send_messages=True
+                    )
+                except Exception as e:
+                    print(f"[bot] 設定 command 頻道發言權限失敗: {e}")
 
     async def _resolve_channel(
         self, kv_key: str, env_id, name: str, topic: str, *, public: bool
@@ -189,10 +200,10 @@ class KiroBot(discord.Client):
             view_channel=True, send_messages=True, read_message_history=True,
             manage_messages=True, manage_webhooks=True,
         )
-        if public:  # 大家看得到、但不能貼文 (避免洗版); slash 指令不受 send 限制
+        if public:  # 大家看得到也能發言
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(
-                    view_channel=True, send_messages=False
+                    view_channel=True, send_messages=True
                 ),
                 guild.me: me_perm,
             }
@@ -280,7 +291,7 @@ class KiroBot(discord.Client):
         if h is None:
             return
         try:
-            await self.route(h)
+            await self.route(h, message)
         except Exception as e:
             print(f"[bot] route 失敗: {e}")
             return
@@ -292,7 +303,7 @@ class KiroBot(discord.Client):
         except Exception:
             pass
 
-    async def route(self, h: dict):
+    async def route(self, h: dict, message: "discord.Message" = None):
         user = str(h.get("u") or "kiro-user")
 
         if h.get("k") == "Hello":  # client 上線: 立刻建 forum + 資訊 thread
@@ -318,10 +329,27 @@ class KiroBot(discord.Client):
                 print(f"[bot] 重新命名 thread 失敗: {e}")
         # 依角色加標籤: Prompt -> user, AssistantMessage -> response
         text = re.sub(r"\n{3,}", "\n\n", text.strip())  # 壓掉連續 3+ 空行
-        label = {"Prompt": "user", "AssistantMessage": "response"}.get(h.get("k"), "")
-        body = f"{label}:\n{text}" if label else text
-        for piece in chunk(body, THREAD_PIECE):
-            await thread.send(piece)
+        label = {"Prompt": "user", "AssistantMessage": "response",
+                 "ToolResults": "🔧 tool"}.get(h.get("k"), "")
+        if text:
+            body = f"{label}:\n{text}" if label else text
+            for piece in chunk(body, THREAD_PIECE):
+                await thread.send(piece)
+
+        # 轉貼附件 (貼圖) 到 thread
+        if message and message.attachments:
+            cap = f"{label}: 🖼️ 附件" if label else "🖼️ 附件"
+            first = True
+            for att in message.attachments:
+                try:
+                    raw = await att.read()
+                    await thread.send(
+                        content=(cap if first else None),
+                        file=discord.File(io.BytesIO(raw), filename=att.filename),
+                    )
+                    first = False
+                except Exception as e:
+                    print(f"[bot] 附件轉貼失敗: {e}")
 
     async def _hello(self, user: str, ts: str) -> None:
         forum = await self.ensure_forum(user)

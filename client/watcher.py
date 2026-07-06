@@ -14,19 +14,115 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
 from store import Store
 
+ATTACHED_MAX = 4000    # @ 文字檔內容截斷
+RAW_DB_MAX = 20000     # 存進 DB 的 raw_json 上限 (圖片那行可達數百 KB)
+ATTACHED_RE = re.compile(r'<attached_file path="([^"]*)">(.*?)</attached_file>', re.DOTALL)
 
-def _extract_text(data: dict) -> Optional[str]:
+
+def _looks_binary(s: str) -> bool:
+    if not s:
+        return False
+    sample = s[:2000]
+    bad = sum(1 for ch in sample if ch == "�" or ord(ch) < 9)
+    return bad / max(1, len(sample)) > 0.10
+
+
+def _sub_attached(m: "re.Match") -> str:
+    fname, body = m.group(1), m.group(2)
+    if _looks_binary(body):  # @ 圖片/二進位檔 -> 只留標記, 不倒亂碼
+        return f"\n📎 附加二進位檔 `{fname}`（略過原始位元組）\n"
+    b = body.strip()
+    if len(b) > ATTACHED_MAX:
+        b = b[:ATTACHED_MAX] + f" …(截斷, 共 {len(b)} 字)"
+    return f"\n📎 附加檔案 `{fname}`：\n{b}\n"
+
+
+def _render_text_item(t: str) -> str:
+    """把 @ 附加檔案的 <attached_file> 區塊整理成可讀標記 (二進位則跳過)。"""
+    return ATTACHED_RE.sub(_sub_attached, t)
+
+
+TOOL_RESULT_MAX = 1000  # 單個工具結果截斷長度 (工具回傳可能很大)
+
+
+def _flatten_toolresult(content) -> str:
+    """把 toolResult.data.content ([{kind:text/json,...}]) 攤平成字串。"""
+    if not isinstance(content, list):
+        return str(content)
+    out = []
+    for c in content:
+        if not isinstance(c, dict):
+            continue
+        if c.get("kind") == "json":
+            try:
+                out.append(json.dumps(c.get("data"), ensure_ascii=False))
+            except Exception:
+                out.append(str(c.get("data")))
+        else:
+            out.append(str(c.get("data", "")))
+    return " ".join(p for p in out if p).strip()
+
+
+def _render_content(data: dict, include_tools: bool = True) -> Optional[str]:
+    """把一個事件的 content[] render 成文字。
+    text -> 原文; toolUse -> 🔧 呼叫; toolResult -> ↩️ 結果 (截斷)。"""
     content = data.get("content")
     if not isinstance(content, list):
         return None
-    parts = [c.get("data", "") for c in content if isinstance(c, dict) and c.get("kind") == "text"]
-    text = "".join(parts).strip()
+    parts = []
+    for c in content:
+        if not isinstance(c, dict):
+            continue
+        k = c.get("kind")
+        if k == "text":
+            t = c.get("data", "")
+            if t:
+                parts.append(_render_text_item(t))
+        elif k == "toolUse" and include_tools:
+            d = c.get("data", {}) if isinstance(c.get("data"), dict) else {}
+            name = d.get("name", "?")
+            try:
+                inp = json.dumps(d.get("input"), ensure_ascii=False)
+            except Exception:
+                inp = str(d.get("input"))
+            if len(inp) > 300:
+                inp = inp[:300] + "…"
+            parts.append(f"🔧 呼叫工具 `{name}` {inp}")
+        elif k == "toolResult" and include_tools:
+            d = c.get("data", {}) if isinstance(c.get("data"), dict) else {}
+            res = _flatten_toolresult(d.get("content"))
+            if len(res) > TOOL_RESULT_MAX:
+                res = res[:TOOL_RESULT_MAX] + f" …(截斷, 共 {len(res)} 字)"
+            parts.append(f"↩️ 工具結果 {res}")
+    text = "\n".join(p for p in parts if p).strip()
     return text or None
+
+
+def _extract_attachments(data: dict, seq: int) -> list:
+    """從 content 抽出 image (多模態貼圖) -> [{filename, data:bytes}]。"""
+    content = data.get("content")
+    if not isinstance(content, list):
+        return []
+    out = []
+    for idx, c in enumerate(content):
+        if not isinstance(c, dict) or c.get("kind") != "image":
+            continue
+        cd = c.get("data", {}) if isinstance(c.get("data"), dict) else {}
+        fmt = str(cd.get("format") or "png").lower()
+        src = cd.get("source", {}) if isinstance(cd.get("source"), dict) else {}
+        if src.get("kind") == "bytes" and isinstance(src.get("data"), list):
+            try:
+                b = bytes(src["data"])
+            except Exception:
+                continue
+            out.append({"filename": f"paste_{seq}_{idx}.{fmt}", "data": b})
+    return out
 
 
 def _extract_ts(data: dict) -> Optional[int]:
@@ -41,11 +137,13 @@ class Watcher:
         self, watch_dir: Path, store: Store, *,
         on_event: Optional[Callable[[dict], None]] = None,
         backfill: bool = False,
+        include_tools: bool = True,
     ):
         self.dir = watch_dir
         self.store = store
         self.on_event = on_event
         self.backfill = backfill
+        self.include_tools = include_tools
         self._initialized: set[str] = set()
         # 啟動當下就已存在的 session 檔 = 舊 session (不回填時跳過其既有內容);
         # 啟動後才「冒出來」的檔 = 你新開的 session, 從頭完整擷取。
@@ -96,14 +194,16 @@ class Watcher:
 
         kind = evt.get("kind", "Unknown")
         data = evt.get("data", {}) if isinstance(evt.get("data"), dict) else {}
-        text = _extract_text(data)
+        text = _render_content(data, self.include_tools)
+        attachments = _extract_attachments(data, seq)
         ts = _extract_ts(data)
 
-        is_new = self.store.add_event(session_id, seq, kind, ts, text, line)
+        raw_db = line if len(line) <= RAW_DB_MAX else line[:RAW_DB_MAX] + "…(truncated)"
+        is_new = self.store.add_event(session_id, seq, kind, ts, text, raw_db)
         if is_new and self.on_event is not None:
             self.on_event({
                 "session_id": session_id, "seq": seq, "kind": kind,
-                "ts": ts, "text": text,
+                "ts": ts, "text": text, "attachments": attachments,
             })
 
     def _process_file(self, path: Path) -> None:

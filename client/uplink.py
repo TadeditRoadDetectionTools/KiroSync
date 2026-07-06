@@ -16,11 +16,14 @@ import json
 import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Callable, Optional
 
 from util import chunk
 
 PIECE = 1800  # content 上限 2000, 留給 header
+ATTACH_MAX_BYTES = 8 * 1024 * 1024  # Discord webhook 附件上限 (保守 8MB)
+_UA = "DiscordBot (KiroSync, 1.0)"
 
 
 def post_hello(webhook_url: str, user: str, log: Callable[[str], None] = print) -> None:
@@ -36,7 +39,7 @@ def post_event(
     meta: Optional[dict] = None, log: Callable[[str], None] = print,
 ) -> None:
     meta = meta or {}
-    pieces = chunk(evt.get("text") or "", PIECE) or [""]
+    pieces = chunk(evt.get("text") or "", PIECE)  # 無文字 -> 空 list, 不送空訊息
     n = len(pieces)
     for i, piece in enumerate(pieces):
         header = {
@@ -49,21 +52,27 @@ def post_event(
         content = "KSV1 " + json.dumps(header, ensure_ascii=False) + "\n" + piece
         _post(webhook_url, content, log)
 
+    # 附件 (貼圖) 用 multipart 送
+    for att in (evt.get("attachments") or []):
+        data = att.get("data") or b""
+        if len(data) > ATTACH_MAX_BYTES:
+            log(f"[uplink] 附件 {att.get('filename')} 太大 ({len(data)} bytes), 略過")
+            continue
+        header = {
+            "u": user, "s": evt["session_id"], "k": evt["kind"], "q": evt["seq"],
+            "att": att.get("filename"), "title": meta.get("title"), "cwd": meta.get("cwd"),
+        }
+        content = "KSV1 " + json.dumps(header, ensure_ascii=False)
+        _post_multipart(webhook_url, content, att.get("filename", "file.bin"), data, log)
 
-def _post(url: str, content: str, log: Callable[[str], None]) -> None:
-    body = json.dumps({"content": content}).encode("utf-8")
+
+def _send_raw(url, body: bytes, ctype: str, log: Callable[[str], None]) -> None:
+    # Discord/Cloudflare 會 403 擋掉預設 Python-urllib UA, 一定要帶
+    headers = {"Content-Type": ctype, "User-Agent": _UA}
     for _ in range(5):
-        req = urllib.request.Request(
-            url, data=body,
-            headers={
-                "Content-Type": "application/json",
-                # Discord/Cloudflare 會 403 擋掉預設的 Python-urllib UA, 一定要帶
-                "User-Agent": "DiscordBot (KiroSync, 1.0)",
-            },
-            method="POST",
-        )
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 r.read()
             return
         except urllib.error.HTTPError as e:
@@ -80,3 +89,25 @@ def _post(url: str, content: str, log: Callable[[str], None]) -> None:
         except Exception as e:
             log(f"[uplink] 失敗: {e}")
             return
+
+
+def _post(url: str, content: str, log: Callable[[str], None]) -> None:
+    body = json.dumps({"content": content}).encode("utf-8")
+    _send_raw(url, body, "application/json", log)
+
+
+def _post_multipart(url, content: str, filename: str, file_bytes: bytes,
+                    log: Callable[[str], None]) -> None:
+    boundary = "----KiroSync" + uuid.uuid4().hex
+    payload = json.dumps({"content": content}).encode("utf-8")
+    pre = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="payload_json"\r\n'
+        f"Content-Type: application/json\r\n\r\n"
+    ).encode("utf-8") + payload + (
+        f"\r\n--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("utf-8")
+    body = pre + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    _send_raw(url, body, f"multipart/form-data; boundary={boundary}", log)

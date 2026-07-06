@@ -58,12 +58,19 @@ def user_name() -> str:
     return _e("USER_NAME") or os.environ.get("USERNAME") or "kiro-user"
 
 
+def include_tools() -> bool:
+    return (_e("SYNC_TOOLS") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _fmt(evt: dict) -> str:
-    label = {"Prompt": "user", "AssistantMessage": "response"}.get(evt["kind"], evt["kind"])
-    text = (evt["text"] or "").replace("\n", " ")
+    label = {"Prompt": "user", "AssistantMessage": "response",
+             "ToolResults": "tool"}.get(evt["kind"], evt["kind"])
+    text = (evt.get("text") or "").replace("\n", " ")
     if len(text) > 200:
         text = text[:200] + "…"
-    return f"[{evt['session_id'][:8]}] {label}: {text}"
+    natt = len(evt.get("attachments") or [])
+    tag = f" 🖼️x{natt}" if natt else ""
+    return f"[{evt['session_id'][:8]}] {label}:{tag} {text}"
 
 
 def _meta(store: Store, session_id: str) -> dict:
@@ -93,7 +100,8 @@ def cmd_sync(args) -> None:
     store = Store(db_path())
 
     def handle(evt: dict) -> None:
-        if not (evt.get("text") or "").strip():  # 跳過無文字的工具回合, thread 只留真正對話
+        # 跳過既無文字又無附件的事件 (例如純工具回合的空殼)
+        if not (evt.get("text") or "").strip() and not evt.get("attachments"):
             return
         meta = _meta(store, evt["session_id"])
         if wl and (meta.get("cwd") or "") not in wl:  # 空清單=全部同步
@@ -103,8 +111,9 @@ def cmd_sync(args) -> None:
 
     # 一連上就讓 bot 建好 forum + 資訊 thread (不用等第一則對話)
     post_hello(webhook, user)
-    watcher = Watcher(watch_dir(), store, on_event=handle, backfill=args.backfill)
-    print(f"[ks] sync 中: {watch_dir()} -> Discord webhook  使用者={user}")
+    watcher = Watcher(watch_dir(), store, on_event=handle,
+                      backfill=args.backfill, include_tools=include_tools())
+    print(f"[ks] sync 中: {watch_dir()} -> Discord webhook  使用者={user}  工具記錄={include_tools()}")
     _loop(watcher, store)
 
 
@@ -127,13 +136,13 @@ def cmd_import(args) -> None:
     store = Store(db_path())
 
     def handle(evt: dict) -> None:
-        if not (evt.get("text") or "").strip():
+        if not (evt.get("text") or "").strip() and not evt.get("attachments"):
             return
         meta = _meta(store, evt["session_id"])
         post_event(webhook, user, evt, meta)
         print(_fmt(evt), flush=True)
 
-    w = Watcher(wd, store, on_event=handle, backfill=True)
+    w = Watcher(wd, store, on_event=handle, backfill=True, include_tools=include_tools())
     for path in matches:
         sid = path.stem
         # 清掉這個 session 的 offset + events, 讓它重讀重送 (繞過去重)
@@ -150,7 +159,7 @@ def cmd_tail(args) -> None:
     store = Store(db_path())
     watcher = Watcher(watch_dir(), store,
                       on_event=lambda e: print(_fmt(e), flush=True),
-                      backfill=args.backfill)
+                      backfill=args.backfill, include_tools=include_tools())
     print(f"[ks] 監看 {watch_dir()}  (Ctrl-C 結束)  backfill={args.backfill}")
     _loop(watcher, store)
 
@@ -159,7 +168,7 @@ def cmd_once(args) -> None:
     store = Store(db_path())
     watcher = Watcher(watch_dir(), store,
                       on_event=lambda e: print(_fmt(e), flush=True),
-                      backfill=args.backfill)
+                      backfill=args.backfill, include_tools=include_tools())
     watcher.scan_once()
     store.close()
 

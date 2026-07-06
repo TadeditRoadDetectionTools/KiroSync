@@ -94,7 +94,8 @@ python run.py events <sid>
 或在任何頻道打 **`/webhook`**,把那條 URL 複製進 client 的 `.env`。
 
 `.env` 欄位:`WEBHOOK_URL`、`USER_NAME`、`SYNC_WORKSPACES`(逗號分隔 cwd,空=全部)、
-`WATCH_DIR`(留空=自動抓 `~/.kiro/sessions/cli`)、`POLL_INTERVAL`、`DB_PATH`。
+`WATCH_DIR`(留空=自動抓 `~/.kiro/sessions/cli`)、`POLL_INTERVAL`、
+`SYNC_TOOLS`(1=連工具呼叫/結果一起同步,0=只同步純文字)、`DB_PATH`。
 
 ---
 
