@@ -106,6 +106,13 @@ class KiroBot(discord.Client):
                 f"把這條填進 client 的 `.env` 的 `WEBHOOK_URL`:\n{url}", ephemeral=True
             )
 
+        @tree.command(name="link",
+                      description="取得指定 session 的搬移下載連結 (需先在來源機 export)")
+        @discord.app_commands.describe(session_id="session id (可只給前幾碼)")
+        async def _link(interaction: discord.Interaction, session_id: str):
+            await interaction.response.defer(ephemeral=True)
+            await self._session_link(interaction, session_id)
+
         @tree.command(name="help", description="列出 KiroSync 指令")
         async def _help(interaction: discord.Interaction):
             await interaction.response.send_message(
@@ -113,9 +120,57 @@ class KiroBot(discord.Client):
                 "`/ping` 檢查在線\n"
                 "`/status` bot 狀態\n"
                 "`/webhook` 取得 client webhook URL\n"
+                "`/link <sid>` 取得某 session 搬移包的下載連結 (先在來源機 export)\n"
                 "`/help` 這個說明",
                 ephemeral=True,
             )
+
+    async def _session_link(self, interaction: "discord.Interaction", session_id: str) -> None:
+        """找出指定 session 的 thread, 掃出最新的 .zip 搬移包, 回傳其下載連結。
+        連結由 Discord 在此刻讀取時重新簽章, 所以每次都是新鮮的 (不會過期)。"""
+        sid = (session_id or "").strip()
+        rows = self.store.db.execute(
+            "SELECT session_id, thread_id FROM sessions "
+            "WHERE session_id LIKE ? AND thread_id IS NOT NULL",
+            (sid + "%",),
+        ).fetchall()
+        if not rows:
+            await interaction.followup.send(
+                f"找不到符合 `{sid}` 的 session (它同步過或 export 過嗎?)", ephemeral=True)
+            return
+        if len(rows) > 1:
+            listing = "\n".join(f"• `{r['session_id']}`" for r in rows[:10])
+            await interaction.followup.send(
+                f"符合多個 session, 請給更完整的 id:\n{listing}", ephemeral=True)
+            return
+        full_sid = rows[0]["session_id"]
+        thread = self.get_channel(int(rows[0]["thread_id"])) \
+            or await self._fetch(int(rows[0]["thread_id"]))
+        if not isinstance(thread, discord.Thread):
+            await interaction.followup.send("找不到對應 thread。", ephemeral=True)
+            return
+        found = None
+        try:
+            async for msg in thread.history(limit=200):  # 預設由新到舊, 取最新的 zip
+                for att in msg.attachments:
+                    if att.filename.lower().endswith(".zip"):
+                        found = att
+                        break
+                if found:
+                    break
+        except Exception as e:
+            await interaction.followup.send(f"讀 thread 失敗: {e}", ephemeral=True)
+            return
+        if not found:
+            await interaction.followup.send(
+                f"`{full_sid[:8]}` 的 thread 裡沒有搬移包。請先在來源機跑 "
+                f"`python run.py export {full_sid[:8]}`。", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"📦 **Session 搬移包** `{full_sid[:8]}`\n"
+            f"在目標機器跑:\n```\npython run.py pull \"{found.url}\"\n```\n"
+            f"要落在別的資料夾就加 `--cwd \"<路徑>\"`。",
+            ephemeral=True)
 
     async def _status(self, text: str) -> None:
         if not self.command_id:

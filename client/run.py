@@ -6,6 +6,8 @@ KiroSync Client 進入點 (擷取 + 上行)。
     cp .env.example .env      # 填好 WEBHOOK_URL / USER_NAME 後
     python run.py sync        # 監看並上行到 Discord (預設只傳啟動後的新對話)
     python run.py sync --backfill   # 連既有內容也傳
+    python run.py export <sid>      # 把某 session 打包上傳 Discord (供他機搬移)
+    python run.py pull <url>        # 從 Discord 附件連結還原 session 到本機
     python run.py tail        # 只在本機即時印出+存 (不碰 Discord)
     python run.py once        # 掃一次
     python run.py sessions    # 列出已存 session
@@ -15,14 +17,17 @@ KiroSync Client 進入點 (擷取 + 上行)。
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import os
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 from envcfg import get, load_env
 from store import Store
-from uplink import post_event, post_hello
+from uplink import ATTACH_MAX_BYTES, fetch_bytes, post_event, post_hello, post_transfer
 from watcher import Watcher
 
 HERE = Path(__file__).resolve().parent
@@ -155,6 +160,108 @@ def cmd_import(args) -> None:
     print("[ks] import 完成。")
 
 
+def cmd_export(args) -> None:
+    """把指定 session 的 .jsonl+.json 打包成 zip, 當單一附件上傳 Discord。
+    接收端在 Discord「複製附件連結」, 到目標機器跑 `pull <連結>` 還原。"""
+    webhook = _e("WEBHOOK_URL")
+    if not webhook:
+        sys.exit(".env 缺 WEBHOOK_URL")
+    user = user_name()
+    wd = watch_dir()
+    matches = sorted(wd.glob(f"{args.session_id}*.jsonl"))
+    if not matches:
+        sys.exit(f"在 {wd} 找不到符合 '{args.session_id}' 的 session 檔")
+    if len(matches) > 1 and not args.all:
+        print("符合多個 session, 請給更完整的 id, 或加 --all 全部匯出:")
+        for m in matches:
+            print("   ", m.stem)
+        return
+
+    for jsonl_path in matches:
+        sid = jsonl_path.stem
+        json_path = wd / f"{sid}.json"
+        title = cwd = None
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(jsonl_path, arcname=jsonl_path.name)
+            if json_path.exists():
+                z.write(json_path, arcname=json_path.name)
+                try:
+                    meta = json.loads(json_path.read_text(encoding="utf-8"))
+                    if isinstance(meta, dict):
+                        title, cwd = meta.get("title"), meta.get("cwd")
+                except Exception:
+                    pass
+        blob = buf.getvalue()
+        if len(blob) > ATTACH_MAX_BYTES:
+            print(f"[ks] {sid} 打包後 {len(blob) / 1024 / 1024:.1f} MB > 8 MB 上限, 略過")
+            continue
+        caption = (
+            "📦 **Session 匯出包** — 對此附件「複製連結」, 到目標機器跑 "
+            "`python run.py pull <連結>` 還原\n"
+            f"Session ID: `{sid}`\nTitle: {title or '(no title)'}"
+        )
+        post_transfer(webhook, user, sid, f"{sid}.zip", blob,
+                      title=title, cwd=cwd, caption=caption)
+        print(f"[ks] 已匯出 {sid} ({len(blob) / 1024:.0f} KB zip) → Discord thread")
+    print("[ks] export 完成。到 Discord 對附件複製連結, "
+          "目標機器跑: python run.py pull <連結>")
+
+
+def _rewrite_cwd(raw: bytes, new_cwd: str) -> bytes:
+    """把 session .json 的 cwd 改寫成 new_cwd, 並把 permissions 裡等於舊 cwd
+    的可讀/可寫路徑一起換掉 (讓搬到本機後落在對的資料夾)。"""
+    try:
+        meta = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        print(f"[ks] .json 解析失敗, cwd 未改寫: {e}")
+        return raw
+    old = meta.get("cwd")
+    meta["cwd"] = new_cwd
+    try:
+        fs = meta["session_state"]["permissions"]["filesystem"]
+        for key in ("allowed_read_paths", "allowed_write_paths",
+                    "denied_read_paths", "denied_write_paths"):
+            lst = fs.get(key)
+            if isinstance(lst, list) and old:
+                fs[key] = [new_cwd if p == old else p for p in lst]
+    except (KeyError, TypeError):
+        pass
+    print(f"[ks] cwd 改寫: {old!r} -> {new_cwd!r}")
+    return json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def cmd_pull(args) -> None:
+    """從 Discord 附件連結抓 zip, 解開寫回本機 session 目錄。零憑證, 純向外。
+    加 --cwd 可在還原時把 session 的工作目錄改寫成本機路徑。"""
+    wd = watch_dir()
+    wd.mkdir(parents=True, exist_ok=True)
+    for url in args.url:
+        blob = fetch_bytes(url)
+        if blob is None:
+            continue
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(blob))
+        except zipfile.BadZipFile:
+            print(f"[ks] 不是有效的 zip (連結對嗎?): {url[:60]}…")
+            continue
+        written = []
+        for name in zf.namelist():
+            base = os.path.basename(name)  # 只取檔名, 防 zip-slip 路徑穿越
+            if not base or not (base.endswith(".jsonl") or base.endswith(".json")):
+                continue
+            data = zf.read(name)
+            if base.endswith(".json") and args.cwd:
+                data = _rewrite_cwd(data, args.cwd)
+            (wd / base).write_bytes(data)
+            written.append(base)
+        if written:
+            print(f"[ks] 已還原到 {wd}: {', '.join(written)}")
+        else:
+            print("[ks] zip 內沒有 .jsonl/.json 可還原")
+    print("[ks] pull 完成。Kiro CLI 現在應該看得到這個 session 了。")
+
+
 def cmd_tail(args) -> None:
     store = Store(db_path())
     watcher = Watcher(watch_dir(), store,
@@ -217,6 +324,17 @@ def main(argv=None) -> None:
     pi.add_argument("session_id", help="session id (可只給前幾碼)")
     pi.add_argument("--all", action="store_true", help="前綴符合多個時全部匯入")
     pi.set_defaults(func=cmd_import)
+
+    px = sub.add_parser("export", help="把指定 session 打包上傳 Discord (供他機 pull 還原)")
+    px.add_argument("session_id", help="session id (可只給前幾碼)")
+    px.add_argument("--all", action="store_true", help="前綴符合多個時全部匯出")
+    px.set_defaults(func=cmd_export)
+
+    pp = sub.add_parser("pull", help="從 Discord 附件連結還原 session 到本機")
+    pp.add_argument("url", nargs="+", help="Discord 附件連結 (可多個)")
+    pp.add_argument("--cwd", help="還原時把 session 的 cwd 改寫成此路徑 "
+                                  "(連 permissions 可讀/可寫路徑一起換), 讓它落在本機資料夾")
+    pp.set_defaults(func=cmd_pull)
 
     ps = sub.add_parser("sessions", help="列出 session")
     ps.set_defaults(func=cmd_sessions)

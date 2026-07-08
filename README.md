@@ -68,7 +68,8 @@ python run.py
 
 ### Slash 指令
 - `/ping` 檢查在線 · `/status` 論壇數/同步 session 數/運行時間 ·
-  `/webhook` 取得 client 要填的 webhook URL · `/help` 說明。
+  `/webhook` 取得 client 要填的 webhook URL · `/link <sid>` 取得某 session 搬移包下載連結 ·
+  `/help` 說明。
 
 ---
 
@@ -82,6 +83,8 @@ cp .env.example .env        # 填 WEBHOOK_URL / USER_NAME
 python run.py sync          # 監看並上行 (預設只傳啟動後的新對話)
 python run.py sync --backfill   # 連既有內容也傳
 python run.py import <sid>  # 朔及既往: 把某個舊 session 重讀並上傳
+python run.py export <sid>  # 搬移: 把某 session 打包 (zip) 上傳 Discord
+python run.py pull <url>    # 搬移: 從 Discord 附件連結還原 session 到本機
 
 # 不碰 Discord 的本機模式:
 python run.py tail          # 即時印出 + 存 ks_client.db
@@ -92,6 +95,24 @@ python run.py events <sid>
 
 **`WEBHOOK_URL` 從哪來?** bot 上線後,到 Discord 的 `kiro-command` 頻道看**釘選訊息**,
 或在任何頻道打 **`/webhook`**,把那條 URL 複製進 client 的 `.env`。
+
+### 跨機搬移 session(export / pull)
+把 A 機的某個 Kiro session 整包搬到 B 機,用 Discord 當中繼、不需兩機直連:
+
+1. **A 機**:`python run.py export <sid>` — 把 `<sid>.jsonl` + `<sid>.json` 壓成一個 zip,
+   透過 webhook 當附件上傳,落到該 session 的 Discord thread。
+2. **取得連結**:在 Discord 打 `/link <sid>`(bot 掃該 session thread 裡最新的搬移包,
+   回傳一條**現簽的**下載連結,直接附上要跑的 `pull` 指令)——或手動對 zip 附件「複製連結」。
+3. **B 機**:`python run.py pull <連結>` — client 用 urllib 抓下 zip、解開寫回
+   `~/.kiro/sessions/cli/`,Kiro CLI 就能接續這個 session。
+
+> **落在本機資料夾**:session 的「屬於哪個資料夾」是存在 `<id>.json` 的 `cwd` 欄位(不是靠檔案位置)。
+> 原封還原會沿用 A 機的 `cwd`;若 B 機路徑不同,加 `--cwd` 改寫,連 permissions 可讀/可寫路徑一起換:
+> `python run.py pull <連結> --cwd "D:\work\myproj"`
+
+> B 機一樣**零憑證**,只是把「複製一條 URL」的動作套用在附件上(跟貼 `WEBHOOK_URL` 同款)。
+> 附件連結是 Discord CDN 的簽章連結,**約 24 小時後過期**,過期就回 Discord 重新複製即可。
+> 打包後超過 8MB(含大量貼圖的 session)會略過並提示。
 
 `.env` 欄位:`WEBHOOK_URL`、`USER_NAME`、`SYNC_WORKSPACES`(逗號分隔 cwd,空=全部)、
 `WATCH_DIR`(留空=自動抓 `~/.kiro/sessions/cli`)、`POLL_INTERVAL`、

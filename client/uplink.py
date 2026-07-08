@@ -96,6 +96,33 @@ def _post(url: str, content: str, log: Callable[[str], None]) -> None:
     _send_raw(url, body, "application/json", log)
 
 
+def post_transfer(
+    webhook_url: str, user: str, session_id: str, filename: str, blob: bytes,
+    *, title: Optional[str] = None, cwd: Optional[str] = None,
+    caption: str = "", log: Callable[[str], None] = print,
+) -> None:
+    """把整包 session (已壓成 zip) 當單一附件送到該 session 的 thread。
+    bot 會把附件轉貼到 thread; 接收端在 Discord 複製該附件連結, 用 `pull` 抓回。"""
+    header = {"u": user, "s": session_id, "k": "Transfer", "title": title, "cwd": cwd}
+    content = "KSV1 " + json.dumps(header, ensure_ascii=False)
+    if caption:
+        content += "\n" + caption
+    _post_multipart(webhook_url, content, filename, blob, log)
+
+
+def fetch_bytes(url: str, log: Callable[[str], None] = print) -> Optional[bytes]:
+    """GET 一個 (Discord CDN) 附件連結, 回傳位元組; 失敗回 None。零憑證, 純向外。"""
+    req = urllib.request.Request(url, headers={"User-Agent": _UA}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        log(f"[uplink] 下載失敗 HTTP {e.code} (連結可能已過期, 到 Discord 重新複製)")
+    except Exception as e:
+        log(f"[uplink] 下載失敗: {e}")
+    return None
+
+
 def _post_multipart(url, content: str, filename: str, file_bytes: bytes,
                     log: Callable[[str], None]) -> None:
     boundary = "----KiroSync" + uuid.uuid4().hex
