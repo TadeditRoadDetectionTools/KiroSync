@@ -3,10 +3,10 @@ Client 端「上行」: 把一則事件 POST 到 Discord Webhook。
 
 只用標準庫 (urllib)。兩機之間沒有任何直接連線 — 只有「本機 -> discord.com」向外 HTTPS。
 
-Wire format (bot 端 parse_ingest 對應):
-    KSV1 {"u":..,"s":..,"k":..,"q":..,"p":..,"n":..[,"title":..,"cwd":..]}\n<文字片段>
-    長文字切成多段 (每段 <=1800 字), p=片段序號、n=總片段數;
-    title/cwd 只放第一段 (p=0), bot 用來建 thread。
+架構 B 的 wire format (bot 端 parse_ingest 對應):
+    Hello:  KSV1 {"u":..,"k":"Hello","s":"","ts":..}\n
+    Snap :  KSV1 {"u":..,"s":..,"k":"Snap","g":世代,"p":片號,"n":總片,"title":..,"cwd":..}
+            附件 = session zip 的一個切片; bot 收齊併回、渲染、並留存供離線 pull。
 """
 
 from __future__ import annotations
@@ -17,12 +17,10 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import zlib
 from typing import Callable, Optional
 
-from util import chunk
-
-PIECE = 1800  # content 上限 2000, 留給 header
-ATTACH_MAX_BYTES = 8 * 1024 * 1024  # Discord webhook 附件上限 (保守 8MB)
+SNAP_CHUNK_BYTES = 24 * 1024 * 1024  # 快照切片上限 (Discord 單附件約 25MB, 留安全值)
 _UA = "DiscordBot (KiroSync, 1.0)"
 
 
@@ -32,38 +30,6 @@ def post_hello(webhook_url: str, user: str, log: Callable[[str], None] = print) 
     header = {"u": user, "k": "Hello", "s": "", "ts": ts}
     content = "KSV1 " + json.dumps(header, ensure_ascii=False) + "\n"
     _post(webhook_url, content, log)
-
-
-def post_event(
-    webhook_url: str, user: str, evt: dict,
-    meta: Optional[dict] = None, log: Callable[[str], None] = print,
-) -> None:
-    meta = meta or {}
-    pieces = chunk(evt.get("text") or "", PIECE)  # 無文字 -> 空 list, 不送空訊息
-    n = len(pieces)
-    for i, piece in enumerate(pieces):
-        header = {
-            "u": user, "s": evt["session_id"], "k": evt["kind"],
-            "q": evt["seq"], "p": i, "n": n,
-        }
-        if i == 0:
-            header["title"] = meta.get("title")
-            header["cwd"] = meta.get("cwd")
-        content = "KSV1 " + json.dumps(header, ensure_ascii=False) + "\n" + piece
-        _post(webhook_url, content, log)
-
-    # 附件 (貼圖) 用 multipart 送
-    for att in (evt.get("attachments") or []):
-        data = att.get("data") or b""
-        if len(data) > ATTACH_MAX_BYTES:
-            log(f"[uplink] 附件 {att.get('filename')} 太大 ({len(data)} bytes), 略過")
-            continue
-        header = {
-            "u": user, "s": evt["session_id"], "k": evt["kind"], "q": evt["seq"],
-            "att": att.get("filename"), "title": meta.get("title"), "cwd": meta.get("cwd"),
-        }
-        content = "KSV1 " + json.dumps(header, ensure_ascii=False)
-        _post_multipart(webhook_url, content, att.get("filename", "file.bin"), data, log)
 
 
 def _send_raw(url, body: bytes, ctype: str, log: Callable[[str], None]) -> None:
@@ -96,18 +62,30 @@ def _post(url: str, content: str, log: Callable[[str], None]) -> None:
     _send_raw(url, body, "application/json", log)
 
 
-def post_transfer(
-    webhook_url: str, user: str, session_id: str, filename: str, blob: bytes,
+def post_snapshot(
+    webhook_url: str, user: str, session_id: str, zip_bytes: bytes,
     *, title: Optional[str] = None, cwd: Optional[str] = None,
-    caption: str = "", log: Callable[[str], None] = print,
-) -> None:
-    """把整包 session (已壓成 zip) 當單一附件送到該 session 的 thread。
-    bot 會把附件轉貼到 thread; 接收端在 Discord 複製該附件連結, 用 `pull` 抓回。"""
-    header = {"u": user, "s": session_id, "k": "Transfer", "title": title, "cwd": cwd}
-    content = "KSV1 " + json.dumps(header, ensure_ascii=False)
-    if caption:
-        content += "\n" + caption
-    _post_multipart(webhook_url, content, filename, blob, log)
+    gen: Optional[str] = None, chunk_bytes: int = SNAP_CHUNK_BYTES,
+    log: Callable[[str], None] = print,
+) -> int:
+    """架構 B 的上行: 把一個 session 的 zip (內含 .jsonl+.json) 依 chunk 上限切片,
+    每片一則 k:Snap 訊息 (帶 g 世代 / p 片號 / n 總片) 上傳。bot 收齊後併回 zip:
+      - 讀 .jsonl 渲染新增行到 thread (格式化/抽圖都在 bot 端)
+      - 保留這些片訊息當作「可離線拉取」的來源, /link 回其現簽連結
+    回傳送出的片數。gen 預設用「大小-crc32」唯一標識這一版內容 (避免同大小不同內容撞世代)。"""
+    gen = gen or f"{len(zip_bytes)}-{zlib.crc32(zip_bytes) & 0xffffffff:08x}"
+    if chunk_bytes < 1:
+        chunk_bytes = SNAP_CHUNK_BYTES
+    parts = [zip_bytes[i:i + chunk_bytes] for i in range(0, len(zip_bytes), chunk_bytes)] or [b""]
+    n = len(parts)
+    for p, part in enumerate(parts):
+        header = {
+            "u": user, "s": session_id, "k": "Snap",
+            "g": gen, "p": p, "n": n, "title": title, "cwd": cwd,
+        }
+        content = "KSV1 " + json.dumps(header, ensure_ascii=False)
+        _post_multipart(webhook_url, content, f"{session_id}.{gen}.p{p}.zip", part, log)
+    return n
 
 
 def fetch_bytes(url: str, log: Callable[[str], None] = print) -> Optional[bytes]:

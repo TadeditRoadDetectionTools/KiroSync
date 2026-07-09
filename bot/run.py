@@ -26,6 +26,8 @@ def main() -> None:
         "category_id": get(env, "CATEGORY_ID"),
         "ingest_channel_id": get(env, "INGEST_CHANNEL_ID"),
         "command_channel_id": get(env, "COMMAND_CHANNEL_ID"),
+        "include_tools": (get(env, "INCLUDE_TOOLS") or "1").strip().lower()
+        not in ("0", "false", "no", "off"),
     }
     db_path = HERE / (get(env, "DB_PATH") or "ks_bot.db")
     from bot import run_bot  # 延遲載入, 讓缺 discord.py 時錯誤更清楚

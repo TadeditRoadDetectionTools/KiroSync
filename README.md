@@ -4,18 +4,23 @@
 session 對應一條 Discord thread。完整規劃見 [PLAN.md](PLAN.md)、原理見
 [docs/原理筆記.md](docs/原理筆記.md)。
 
-## 架構:兩個獨立部署
+## 架構:兩個獨立部署(client 只傳 raw,bot 端渲染)
 
 ```
 client (每位使用者機器)                Discord (公開中繼)              bot (你的主機)
 ┌────────────────┐   webhook POST   ┌──────────────┐   Gateway   ┌──────────────┐
-│ watcher 監看   │ ───(向外)──────▶ │ #ingest 頻道 │ ◀──(向外)── │ 中央 Bot     │
-│ .jsonl → 上行  │                  └──────────────┘             │ 建 forum/    │
-└────────────────┘                                                │ thread、貼文 │
+│ 監看 .jsonl    │ ──raw 快照(zip)─▶ │ #ingest 頻道 │ ◀──(向外)── │ 中央 Bot     │
+│ 切片上傳快照   │    (向外)         └──────────────┘             │ 解析/渲染/   │
+└────────────────┘                                                │ 貼圖、留快照 │
                                     forum: kiro-<user>            └──────────────┘
                                       ├ thread: session A
                                       └ thread: session B
 ```
+
+**設計(架構 B)**:client **不做解析**,只把整個 session 打成 zip、依上限切片上傳;
+**所有處理(格式化、切段、貼圖、渲染)都在 bot 端**(解析器見 [bot/kiroparse.py](bot/kiroparse.py))。
+bot 收齊一個世代的分片後,只渲染 `.jsonl` 中**新增的行**(append-only),並**保留該世代的分片訊息**
+當作「離線可拉取」的來源——所以**來源機關機時,別台仍可只靠 bot 拉回整個 session**(打 `/link <sid>`)。
 
 兩機之間除了 Discord **沒有任何直接連線**,都只向外連 Discord,不需開 port/公開 IP。
 每個資料夾**各自有自己的 `.env`**、`requirements.txt` 和進入點。
@@ -75,48 +80,51 @@ python run.py
 
 ## `client/` — 擷取 + 上行(每位使用者機器上跑)
 
-零依賴(純標準庫)。
+零依賴(純標準庫)。client 只把 raw 快照上傳,不做解析(渲染在 bot 端)。
 
 ```bash
 cd client
 cp .env.example .env        # 填 WEBHOOK_URL / USER_NAME
-python run.py sync          # 監看並上行 (預設只傳啟動後的新對話)
-python run.py sync --backfill   # 連既有內容也傳
-python run.py import <sid>  # 朔及既往: 把某個舊 session 重讀並上傳
-python run.py export <sid>  # 搬移: 把某 session 打包 (zip) 上傳 Discord
-python run.py pull <url>    # 搬移: 從 Discord 附件連結還原 session 到本機
+python run.py sync          # 監看並把 raw 快照 (zip) 切片上傳 (bot 端渲染)
+python run.py export <sid>  # 一次性把某 session 快照上傳 (供他機搬移)
+python run.py pull <url...> # 搬移: 把 /link 給的連結(多片依序)還原 session 到本機
 
 # 不碰 Discord 的本機模式:
 python run.py tail          # 即時印出 + 存 ks_client.db
 python run.py once
-python run.py sessions      # 列出本機 session
+python run.py sessions      # 列出本機 session (需先跑過 tail/once)
 python run.py events <sid>
 ```
 
 **`WEBHOOK_URL` 從哪來?** bot 上線後,到 Discord 的 `kiro-command` 頻道看**釘選訊息**,
 或在任何頻道打 **`/webhook`**,把那條 URL 複製進 client 的 `.env`。
 
-### 跨機搬移 session(export / pull)
-把 A 機的某個 Kiro session 整包搬到 B 機,用 Discord 當中繼、不需兩機直連:
+### 跨機搬移 session(靠 bot 拉,來源可離線)
+因為 `sync` 會持續把最新快照留在 bot,搬移不需要來源機在線:
 
-1. **A 機**:`python run.py export <sid>` — 把 `<sid>.jsonl` + `<sid>.json` 壓成一個 zip,
-   透過 webhook 當附件上傳,落到該 session 的 Discord thread。
-2. **取得連結**:在 Discord 打 `/link <sid>`(bot 掃該 session thread 裡最新的搬移包,
-   回傳一條**現簽的**下載連結,直接附上要跑的 `pull` 指令)——或手動對 zip 附件「複製連結」。
-3. **B 機**:`python run.py pull <連結>` — client 用 urllib 抓下 zip、解開寫回
-   `~/.kiro/sessions/cli/`,Kiro CLI 就能接續這個 session。
+1. **來源機**:平常 `python run.py sync` 就會持續上傳快照(或針對單一 session 跑
+   `python run.py export <sid>` 立刻上傳一次)。
+2. **取得連結**:在 Discord 打 `/link <sid>` — bot 回傳最新快照**各分片的現簽連結**,
+   並直接組好要跑的 `pull` 指令。**來源機關機也拉得到**(快照存在 Discord 上)。
+3. **目標機**:把 `/link` 給的指令貼上執行:
+   ```
+   python run.py pull "<片1>" "<片2>" ...
+   ```
+   client 依序併接分片 → 解開寫回 `~/.kiro/sessions/cli/`,Kiro CLI 就能接續這個 session。
 
 > **落在本機資料夾**:session 的「屬於哪個資料夾」是存在 `<id>.json` 的 `cwd` 欄位(不是靠檔案位置)。
-> 原封還原會沿用 A 機的 `cwd`;若 B 機路徑不同,加 `--cwd` 改寫,連 permissions 可讀/可寫路徑一起換:
-> `python run.py pull <連結> --cwd "D:\work\myproj"`
+> 原封還原會沿用來源機的 `cwd`;若目標機路徑不同,加 `--cwd` 改寫,連 permissions 可讀/可寫路徑一起換:
+> `python run.py pull <連結...> --cwd "D:\work\myproj"`
 
-> B 機一樣**零憑證**,只是把「複製一條 URL」的動作套用在附件上(跟貼 `WEBHOOK_URL` 同款)。
-> 附件連結是 Discord CDN 的簽章連結,**約 24 小時後過期**,過期就回 Discord 重新複製即可。
-> 打包後超過 8MB(含大量貼圖的 session)會略過並提示。
+> **內容過大**:快照是 zip(文字壓縮率高),再依 `SNAP_CHUNK_MB`(預設 24MB,Discord 單附件約上限)
+> 切片;過大只是**片數變多**,`/link` 會把每片都列出、`pull` 依序併接,沒有硬上限。
+> 分片連結是 Discord CDN 簽章連結,但 `/link` 每次都**當場重簽**,不會拿到過期的。
 
 `.env` 欄位:`WEBHOOK_URL`、`USER_NAME`、`SYNC_WORKSPACES`(逗號分隔 cwd,空=全部)、
-`WATCH_DIR`(留空=自動抓 `~/.kiro/sessions/cli`)、`POLL_INTERVAL`、
-`SYNC_TOOLS`(1=連工具呼叫/結果一起同步,0=只同步純文字)、`DB_PATH`。
+`WATCH_DIR`(留空=自動抓 `~/.kiro/sessions/cli`)、`POLL_INTERVAL`、`DB_PATH`、
+快照調校:`SNAP_CHUNK_MB`(切片上限)、`SNAP_DEBOUNCE`(停止變動幾秒後上傳)、
+`SNAP_MIN_INTERVAL`(兩次上傳最小間隔)、`SNAP_MAX_WAIT`(持續變動時最遲上傳間隔)。
+`SYNC_TOOLS` 已移到 **bot 端**(改用 bot 的 `INCLUDE_TOOLS`,因為渲染在 bot 做)。
 
 ---
 

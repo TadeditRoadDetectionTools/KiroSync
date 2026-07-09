@@ -19,11 +19,13 @@ import datetime
 import io
 import json
 import re
+import zipfile
 from pathlib import Path
 from typing import Optional
 
 import discord
 
+from kiroparse import parse_line
 from store import Store
 from util import chunk
 
@@ -58,7 +60,11 @@ class KiroBot(discord.Client):
         super().__init__(intents=intents)
         self.cfg = cfg
         self.store = store
+        self.include_tools = bool(cfg.get("include_tools", True))
         self._locks: dict[str, asyncio.Lock] = {}
+        # 快照分片重組緩衝: (session_id, gen) -> {part: bytes} / {part: message_id}
+        self._snap_buf: dict[tuple, dict] = {}
+        self._snap_msgs: dict[tuple, dict] = {}
         self._announced = False
         self.ingest_id: Optional[int] = None   # 實際監聽的 ingest 頻道 (env 指定或 bot 自建)
         self.command_id: Optional[int] = None  # 狀態頻道 (public)
@@ -126,17 +132,15 @@ class KiroBot(discord.Client):
             )
 
     async def _session_link(self, interaction: "discord.Interaction", session_id: str) -> None:
-        """找出指定 session 的 thread, 掃出最新的 .zip 搬移包, 回傳其下載連結。
-        連結由 Discord 在此刻讀取時重新簽章, 所以每次都是新鮮的 (不會過期)。"""
+        """回傳指定 session 最新快照各分片的下載連結。連結由 Discord 在此刻讀取時
+        重新簽章, 所以每次都是新鮮的 (不會過期)。來源 client 關機也拉得到。"""
         sid = (session_id or "").strip()
         rows = self.store.db.execute(
-            "SELECT session_id, thread_id FROM sessions "
-            "WHERE session_id LIKE ? AND thread_id IS NOT NULL",
-            (sid + "%",),
+            "SELECT session_id FROM sessions WHERE session_id LIKE ?", (sid + "%",),
         ).fetchall()
         if not rows:
             await interaction.followup.send(
-                f"找不到符合 `{sid}` 的 session (它同步過或 export 過嗎?)", ephemeral=True)
+                f"找不到符合 `{sid}` 的 session (它同步過嗎?)", ephemeral=True)
             return
         if len(rows) > 1:
             listing = "\n".join(f"• `{r['session_id']}`" for r in rows[:10])
@@ -144,33 +148,36 @@ class KiroBot(discord.Client):
                 f"符合多個 session, 請給更完整的 id:\n{listing}", ephemeral=True)
             return
         full_sid = rows[0]["session_id"]
-        thread = self.get_channel(int(rows[0]["thread_id"])) \
-            or await self._fetch(int(rows[0]["thread_id"]))
-        if not isinstance(thread, discord.Thread):
-            await interaction.followup.send("找不到對應 thread。", ephemeral=True)
-            return
-        found = None
-        try:
-            async for msg in thread.history(limit=200):  # 預設由新到舊, 取最新的 zip
-                for att in msg.attachments:
-                    if att.filename.lower().endswith(".zip"):
-                        found = att
-                        break
-                if found:
-                    break
-        except Exception as e:
-            await interaction.followup.send(f"讀 thread 失敗: {e}", ephemeral=True)
-            return
-        if not found:
+        snap = self.store.get_snapshot(full_sid)
+        if not snap or not snap.get("msg_ids"):
             await interaction.followup.send(
-                f"`{full_sid[:8]}` 的 thread 裡沒有搬移包。請先在來源機跑 "
-                f"`python run.py export {full_sid[:8]}`。", ephemeral=True)
+                f"`{full_sid[:8]}` 還沒有快照。請先在來源機跑 `python run.py sync` "
+                f"(或 `export {full_sid[:8]}`)。", ephemeral=True)
             return
-        await interaction.followup.send(
-            f"📦 **Session 搬移包** `{full_sid[:8]}`\n"
-            f"在目標機器跑:\n```\npython run.py pull \"{found.url}\"\n```\n"
-            f"要落在別的資料夾就加 `--cwd \"<路徑>\"`。",
-            ephemeral=True)
+        ch = self.get_channel(int(snap["channel_id"])) or await self._fetch(int(snap["channel_id"]))
+        urls = []
+        for mid in snap["msg_ids"]:  # 依片序取現簽 URL
+            try:
+                msg = await ch.fetch_message(int(mid))
+                if msg.attachments:
+                    urls.append(msg.attachments[0].url)
+            except Exception:
+                pass
+        if not urls:
+            await interaction.followup.send(
+                f"`{full_sid[:8]}` 的快照分片已不可用, 請在來源機重跑 sync/export。",
+                ephemeral=True)
+            return
+        joined = " ".join(f'"{u}"' for u in urls)
+        cmd = f"python run.py pull {joined}"
+        header = f"📦 **Session 搬移包** `{full_sid[:8]}` ({len(urls)} 片)  加 `--cwd \"<路徑>\"` 可換資料夾"
+        if len(header) + len(cmd) + 12 <= 1990:
+            await interaction.followup.send(f"{header}\n```\n{cmd}\n```", ephemeral=True)
+        else:  # 片太多、指令太長 -> 分段送純文字, 使用者自行接成一行
+            await interaction.followup.send(
+                f"{header}\n指令較長, 分段如下, 請接成一整行執行:", ephemeral=True)
+            for pc in chunk(cmd, 1900):
+                await interaction.followup.send(pc, ephemeral=True)
 
     async def _status(self, text: str) -> None:
         if not self.command_id:
@@ -346,11 +353,13 @@ class KiroBot(discord.Client):
         if h is None:
             return
         try:
-            await self.route(h, message)
+            keep = await self.route(h, message)
         except Exception as e:
             print(f"[bot] route 失敗: {e}")
             return
-        # 處理完就把 ingest 的原始 KSV1 訊息刪掉, 保持 ingest 乾淨 (需 Manage Messages)
+        if keep:
+            return  # 快照分片要保留當「離線可拉取」來源, 不刪 (舊世代另行清理)
+        # 其餘控制訊息處理完就刪掉, 保持 ingest 乾淨 (需 Manage Messages)
         try:
             await message.delete()
         except discord.Forbidden:
@@ -358,53 +367,135 @@ class KiroBot(discord.Client):
         except Exception:
             pass
 
-    async def route(self, h: dict, message: "discord.Message" = None):
+    async def route(self, h: dict, message: "discord.Message" = None) -> bool:
+        """處理一則 ingest。回傳 True 表示「此訊息需保留」(快照分片)。"""
         user = str(h.get("u") or "kiro-user")
-
-        if h.get("k") == "Hello":  # client 上線: 立刻建 forum + 資訊 thread
+        kind = h.get("k")
+        if kind == "Hello":  # client 上線: 立刻建 forum + 資訊 thread
             await self._hello(user, h.get("ts") or "")
-            return
+            return False
+        if kind == "Snap":
+            return await self._on_snap(h, message)
+        return False  # 舊格式 / 未知 kind: 忽略
 
-        session_id = str(h.get("s") or "")
-        text = h.get("_text", "")
-        title = h.get("title") or (session_id[:8] if session_id else "session")
-        cwd = h.get("cwd") or ""
+    async def _on_snap(self, h: dict, message: "discord.Message") -> bool:
+        """收集一個 session 快照的分片; 收齊就重組 zip 並套用。回傳 True 保留此片。"""
+        if message is None or not message.attachments:
+            return False
+        s = str(h.get("s") or "")
+        if not s:
+            return False
+        gen = str(h.get("g"))
+        try:
+            p, n = int(h.get("p", 0)), int(h.get("n", 1))
+        except (TypeError, ValueError):
+            return False
+        try:
+            data = await message.attachments[0].read()
+        except Exception as e:
+            print(f"[bot] 讀 snap 附件失敗: {e}")
+            return False
+        key = (s, gen)
+        self._snap_buf.setdefault(key, {})[p] = data
+        self._snap_msgs.setdefault(key, {})[p] = message.id
+        if len(self._snap_buf[key]) < n:
+            return True  # 還沒收齊
+        try:
+            blob = b"".join(self._snap_buf[key][i] for i in range(n))
+            ordered_ids = [self._snap_msgs[key][i] for i in range(n)]
+        except KeyError:
+            return True  # 片不連續(理論上不會), 再等
+        self._snap_buf.pop(key, None)
+        self._snap_msgs.pop(key, None)
+        try:
+            await self._apply_snapshot(h, s, gen, blob, ordered_ids, message.channel.id)
+        except Exception as e:
+            print(f"[bot] 套用快照失敗 {s[:8]}: {e}")
+        return True  # 這些片保留當 pull 來源 (舊世代在 _apply_snapshot 內刪)
+
+    async def _apply_snapshot(
+        self, h: dict, s: str, gen: str, blob: bytes, msg_ids: list, channel_id: int
+    ) -> None:
+        user = str(h.get("u") or "kiro-user")
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(blob))
+        except zipfile.BadZipFile:
+            print(f"[bot] snap {s[:8]} 併回不是有效 zip, 略過 (可能上傳不完整)")
+            return
+        jsonl_text, meta = "", {}
+        for name in zf.namelist():
+            base = name.rsplit("/", 1)[-1]
+            if base.endswith(".jsonl"):
+                jsonl_text = zf.read(name).decode("utf-8", "replace")
+            elif base.endswith(".json"):
+                try:
+                    meta = json.loads(zf.read(name).decode("utf-8", "replace"))
+                except Exception:
+                    meta = {}
+        m = meta if isinstance(meta, dict) else {}
+        title = h.get("title") or m.get("title") or s[:8]
+        cwd = h.get("cwd") or m.get("cwd") or ""
 
         forum = await self.ensure_forum(user)
         if forum is None:
             return
-        thread = await self.ensure_thread(forum, session_id, title, cwd, user)
+        thread = await self.ensure_thread(forum, s, title, cwd, user)
         if thread is None:
             return
-        # title 常在第一則事件後才由 Kiro 產生; 一旦拿到就把貼文改成 title
-        if h.get("title") and thread.name != title[:100]:
+        if (h.get("title") or m.get("title")) and thread.name != title[:100]:
             try:
                 await thread.edit(name=title[:100])
             except Exception as e:
                 print(f"[bot] 重新命名 thread 失敗: {e}")
-        # 依角色加標籤: Prompt -> user, AssistantMessage -> response
-        text = re.sub(r"\n{3,}", "\n\n", text.strip())  # 壓掉連續 3+ 空行
+
+        # 渲染: .jsonl append-only, 只貼「超過已貼行數」的新行
+        lines = jsonl_text.splitlines()
+        rendered = self.store.get_rendered(s)
+        total = len(lines)
+        for i in range(rendered, total):
+            ev = parse_line(lines[i], i, self.include_tools)
+            if ev is not None:
+                await self._post_event(thread, ev)
+        if total > rendered:
+            self.store.set_rendered(s, total)
+
+        # 更新「可離線拉取」指標: 記本世代分片, 刪上一世代 (容量有界)
+        old = self.store.get_snapshot(s)
+        self.store.set_snapshot(s, gen, channel_id, msg_ids)
+        if old and old.get("gen") != gen:
+            await self._delete_msgs(old.get("channel_id"), old.get("msg_ids") or [])
+
+    async def _post_event(self, thread: "discord.Thread", ev: dict) -> None:
+        """把一個解析後事件貼到 thread: 文字(加角色標籤/切段) + 圖片附件。"""
         label = {"Prompt": "user", "AssistantMessage": "response",
-                 "ToolResults": "🔧 tool"}.get(h.get("k"), "")
+                 "ToolResults": "🔧 tool"}.get(ev.get("kind"), "")
+        text = ev.get("text")
         if text:
+            text = re.sub(r"\n{3,}", "\n\n", text.strip())
             body = f"{label}:\n{text}" if label else text
             for piece in chunk(body, THREAD_PIECE):
                 await thread.send(piece)
+        for att in ev.get("attachments") or []:
+            try:
+                await thread.send(
+                    content=(f"{label}: 🖼️ 附件" if label else "🖼️ 附件"),
+                    file=discord.File(io.BytesIO(att["data"]), filename=att["filename"]),
+                )
+            except Exception as e:
+                print(f"[bot] 附件貼失敗: {e}")
 
-        # 轉貼附件 (貼圖) 到 thread
-        if message and message.attachments:
-            cap = f"{label}: 🖼️ 附件" if label else "🖼️ 附件"
-            first = True
-            for att in message.attachments:
-                try:
-                    raw = await att.read()
-                    await thread.send(
-                        content=(cap if first else None),
-                        file=discord.File(io.BytesIO(raw), filename=att.filename),
-                    )
-                    first = False
-                except Exception as e:
-                    print(f"[bot] 附件轉貼失敗: {e}")
+    async def _delete_msgs(self, channel_id, msg_ids: list) -> None:
+        if not channel_id or not msg_ids:
+            return
+        ch = self.get_channel(int(channel_id)) or await self._fetch(int(channel_id))
+        if ch is None:
+            return
+        for mid in msg_ids:
+            try:
+                msg = await ch.fetch_message(int(mid))
+                await msg.delete()
+            except Exception:
+                pass
 
     async def _hello(self, user: str, ts: str) -> None:
         forum = await self.ensure_forum(user)

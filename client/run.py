@@ -1,16 +1,17 @@
 """
 KiroSync Client 進入點 (擷取 + 上行)。
 
+架構 B: client 只把 raw session 快照 (zip) 上傳; 解析/格式化/貼圖/離線拉取全由 bot 端做。
+
 用法:
     cd client
     cp .env.example .env      # 填好 WEBHOOK_URL / USER_NAME 後
-    python run.py sync        # 監看並上行到 Discord (預設只傳啟動後的新對話)
-    python run.py sync --backfill   # 連既有內容也傳
-    python run.py export <sid>      # 把某 session 打包上傳 Discord (供他機搬移)
-    python run.py pull <url>        # 從 Discord 附件連結還原 session 到本機
+    python run.py sync        # 監看並把 raw 快照上傳 Discord (bot 端渲染)
+    python run.py export <sid>      # 一次性把某 session 快照上傳 (供他機搬移)
+    python run.py pull <url...>     # 從 /link 給的連結還原 session 到本機 (多片依序併接)
     python run.py tail        # 只在本機即時印出+存 (不碰 Discord)
     python run.py once        # 掃一次
-    python run.py sessions    # 列出已存 session
+    python run.py sessions    # 列出已存 session (本機 DB, 需先跑過 tail/once)
     python run.py events <sid>
 """
 
@@ -27,7 +28,7 @@ from pathlib import Path
 
 from envcfg import get, load_env
 from store import Store
-from uplink import ATTACH_MAX_BYTES, fetch_bytes, post_event, post_hello, post_transfer
+from uplink import SNAP_CHUNK_BYTES, fetch_bytes, post_hello, post_snapshot
 from watcher import Watcher
 
 HERE = Path(__file__).resolve().parent
@@ -78,13 +79,6 @@ def _fmt(evt: dict) -> str:
     return f"[{evt['session_id'][:8]}] {label}:{tag} {text}"
 
 
-def _meta(store: Store, session_id: str) -> dict:
-    row = store.db.execute(
-        "SELECT title, cwd FROM sessions WHERE session_id = ?", (session_id,)
-    ).fetchone()
-    return {"title": row["title"] if row else None, "cwd": row["cwd"] if row else None}
-
-
 def _loop(watcher: Watcher, store: Store) -> None:
     try:
         while True:
@@ -96,78 +90,115 @@ def _loop(watcher: Watcher, store: Store) -> None:
         store.close()
 
 
+def _read_cwd(meta_path: Path) -> Optional[str]:
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        return meta.get("cwd") if isinstance(meta, dict) else None
+    except Exception:
+        return None
+
+
+def _build_session_zip(wd: Path, sid: str):
+    """把 session 的 .jsonl(+.json) 打成 zip, 回傳 (zip_bytes, title, cwd)。"""
+    jsonl_path = wd / f"{sid}.jsonl"
+    json_path = wd / f"{sid}.json"
+    title = cwd = None
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(jsonl_path, arcname=jsonl_path.name)
+        if json_path.exists():
+            z.write(json_path, arcname=json_path.name)
+            try:
+                meta = json.loads(json_path.read_text(encoding="utf-8"))
+                if isinstance(meta, dict):
+                    title, cwd = meta.get("title"), meta.get("cwd")
+            except Exception:
+                pass
+    return buf.getvalue(), title, cwd
+
+
+def _snap_params() -> tuple[int, float, float, float]:
+    def f(key, default):
+        try:
+            return float(_e(key) or default)
+        except ValueError:
+            return default
+    chunk = int(f("SNAP_CHUNK_MB", 24) * 1024 * 1024) or SNAP_CHUNK_BYTES
+    return chunk, f("SNAP_DEBOUNCE", 2.0), f("SNAP_MIN_INTERVAL", 5.0), f("SNAP_MAX_WAIT", 15.0)
+
+
 def cmd_sync(args) -> None:
+    """架構 B: 只把 raw session 快照上傳給 bot; 解析/格式化/貼圖全在 bot 端做。
+    去抖動: session 停止變動 debounce 秒後才上傳; 持續變動則最遲 max_wait 秒強制上傳一次;
+    兩次上傳至少間隔 min_interval 秒。bot 保留最新快照供離線 pull。"""
     webhook = _e("WEBHOOK_URL")
     if not webhook:
         sys.exit(".env 缺 WEBHOOK_URL")
     user = user_name()
     wl = workspaces()
-    store = Store(db_path())
-
-    def handle(evt: dict) -> None:
-        # 跳過既無文字又無附件的事件 (例如純工具回合的空殼)
-        if not (evt.get("text") or "").strip() and not evt.get("attachments"):
-            return
-        meta = _meta(store, evt["session_id"])
-        if wl and (meta.get("cwd") or "") not in wl:  # 空清單=全部同步
-            return
-        post_event(webhook, user, evt, meta)
-        print(_fmt(evt), flush=True)
-
-    # 一連上就讓 bot 建好 forum + 資訊 thread (不用等第一則對話)
-    post_hello(webhook, user)
-    watcher = Watcher(watch_dir(), store, on_event=handle,
-                      backfill=args.backfill, include_tools=include_tools())
-    print(f"[ks] sync 中: {watch_dir()} -> Discord webhook  使用者={user}  工具記錄={include_tools()}")
-    _loop(watcher, store)
-
-
-def cmd_import(args) -> None:
-    """朔及既往: 把指定的舊 session 從頭重讀並上傳 (清掉該 session 的既有記錄再重送)。"""
-    webhook = _e("WEBHOOK_URL")
-    if not webhook:
-        sys.exit(".env 缺 WEBHOOK_URL")
-    user = user_name()
     wd = watch_dir()
-    matches = sorted(wd.glob(f"{args.session_id}*.jsonl"))
-    if not matches:
-        sys.exit(f"在 {wd} 找不到符合 '{args.session_id}' 的 session 檔")
-    if len(matches) > 1 and not args.all:
-        print("符合多個 session, 請給更完整的 id, 或加 --all 全部匯入:")
-        for m in matches:
-            print("   ", m.stem)
-        return
+    chunk, debounce, min_interval, max_wait = _snap_params()
 
-    store = Store(db_path())
+    post_hello(webhook, user)  # 讓 bot 先建好 forum + 資訊 thread
+    print(f"[ks] sync(快照模式) 中: {wd} -> Discord  使用者={user}  "
+          f"切片={chunk // 1024 // 1024}MB  去抖={debounce}s")
 
-    def handle(evt: dict) -> None:
-        if not (evt.get("text") or "").strip() and not evt.get("attachments"):
-            return
-        meta = _meta(store, evt["session_id"])
-        post_event(webhook, user, evt, meta)
-        print(_fmt(evt), flush=True)
+    observed: dict[str, tuple] = {}       # sid -> 最近在磁碟上看到的 (jsonl_size, meta_mtime)
+    last_change: dict[str, float] = {}    # sid -> 最近一次變動的時刻
+    first_pending: dict[str, float] = {}  # sid -> 這輪待送從何時開始
+    last_sent_sig: dict[str, tuple] = {}  # sid -> 上次已上傳的 signature
+    last_sent_at: dict[str, float] = {}   # sid -> 上次上傳時刻
 
-    w = Watcher(wd, store, on_event=handle, backfill=True, include_tools=include_tools())
-    for path in matches:
-        sid = path.stem
-        # 清掉這個 session 的 offset + events, 讓它重讀重送 (繞過去重)
-        store.db.execute("DELETE FROM events WHERE session_id = ?", (sid,))
-        store.db.execute("DELETE FROM file_state WHERE path = ?", (str(path),))
-        store.db.commit()
-        print(f"[ks] import {sid} …")
-        w._process_file(path)
-    store.close()
-    print("[ks] import 完成。")
+    try:
+        while True:
+            now = time.time()
+            for jf in sorted(wd.glob("*.jsonl")):
+                sid = jf.stem
+                try:
+                    jsize = jf.stat().st_size
+                except OSError:
+                    continue
+                if jsize == 0:
+                    continue  # 空殼 session 還沒內容, 不送
+                mj = wd / f"{sid}.json"
+                mtime = mj.stat().st_mtime if mj.exists() else 0.0
+                if wl and (_read_cwd(mj) or "") not in wl:  # 空清單=全部同步
+                    continue
+                sig = (jsize, mtime)
+                if sig != observed.get(sid):
+                    observed[sid] = sig
+                    last_change[sid] = now
+                    first_pending.setdefault(sid, now)
+                # 尚未上傳過此 signature, 且 (已閒置 or 等太久), 且距上次上傳夠久 -> 送
+                if sig != last_sent_sig.get(sid) and sid in first_pending:
+                    idle = now - last_change.get(sid, now) >= debounce
+                    waited = now - first_pending[sid] >= max_wait
+                    spaced = now - last_sent_at.get(sid, 0.0) >= min_interval
+                    if (idle or waited) and spaced:
+                        blob, title, cwd = _build_session_zip(wd, sid)
+                        nparts = post_snapshot(webhook, user, sid, blob,
+                                               title=title, cwd=cwd, chunk_bytes=chunk)
+                        last_sent_sig[sid] = sig
+                        last_sent_at[sid] = now
+                        first_pending.pop(sid, None)
+                        print(f"[ks] snapshot {sid[:8]} gen={len(blob)} "
+                              f"{nparts}片 ({len(blob) / 1024:.0f}KB)", flush=True)
+            time.sleep(interval())
+    except KeyboardInterrupt:
+        print("\n[ks] 結束。")
 
 
 def cmd_export(args) -> None:
-    """把指定 session 的 .jsonl+.json 打包成 zip, 當單一附件上傳 Discord。
-    接收端在 Discord「複製附件連結」, 到目標機器跑 `pull <連結>` 還原。"""
+    """一次性把指定 session 快照上傳 (跟 sync 同一條 Snap 管線)。
+    上傳後在 Discord 打 /link <sid> 拿下載連結, 或直接在目標機器 pull。"""
     webhook = _e("WEBHOOK_URL")
     if not webhook:
         sys.exit(".env 缺 WEBHOOK_URL")
     user = user_name()
     wd = watch_dir()
+    chunk, *_ = _snap_params()
     matches = sorted(wd.glob(f"{args.session_id}*.jsonl"))
     if not matches:
         sys.exit(f"在 {wd} 找不到符合 '{args.session_id}' 的 session 檔")
@@ -179,33 +210,12 @@ def cmd_export(args) -> None:
 
     for jsonl_path in matches:
         sid = jsonl_path.stem
-        json_path = wd / f"{sid}.json"
-        title = cwd = None
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-            z.write(jsonl_path, arcname=jsonl_path.name)
-            if json_path.exists():
-                z.write(json_path, arcname=json_path.name)
-                try:
-                    meta = json.loads(json_path.read_text(encoding="utf-8"))
-                    if isinstance(meta, dict):
-                        title, cwd = meta.get("title"), meta.get("cwd")
-                except Exception:
-                    pass
-        blob = buf.getvalue()
-        if len(blob) > ATTACH_MAX_BYTES:
-            print(f"[ks] {sid} 打包後 {len(blob) / 1024 / 1024:.1f} MB > 8 MB 上限, 略過")
-            continue
-        caption = (
-            "📦 **Session 匯出包** — 對此附件「複製連結」, 到目標機器跑 "
-            "`python run.py pull <連結>` 還原\n"
-            f"Session ID: `{sid}`\nTitle: {title or '(no title)'}"
-        )
-        post_transfer(webhook, user, sid, f"{sid}.zip", blob,
-                      title=title, cwd=cwd, caption=caption)
-        print(f"[ks] 已匯出 {sid} ({len(blob) / 1024:.0f} KB zip) → Discord thread")
-    print("[ks] export 完成。到 Discord 對附件複製連結, "
-          "目標機器跑: python run.py pull <連結>")
+        blob, title, cwd = _build_session_zip(wd, sid)
+        nparts = post_snapshot(webhook, user, sid, blob,
+                               title=title, cwd=cwd, chunk_bytes=chunk)
+        print(f"[ks] 已匯出 {sid} ({len(blob) / 1024:.0f} KB zip, {nparts} 片) → Discord")
+    print("[ks] export 完成。到 Discord 打 `/link <sid>` 取得下載連結, "
+          "目標機器跑: python run.py pull <連結...>")
 
 
 def _rewrite_cwd(raw: bytes, new_cwd: str) -> bytes:
@@ -232,34 +242,36 @@ def _rewrite_cwd(raw: bytes, new_cwd: str) -> bytes:
 
 
 def cmd_pull(args) -> None:
-    """從 Discord 附件連結抓 zip, 解開寫回本機 session 目錄。零憑證, 純向外。
-    加 --cwd 可在還原時把 session 的工作目錄改寫成本機路徑。"""
+    """從 Discord 附件連結還原 session。多個連結 = 一個 zip 的多個切片, 依序併接後解開。
+    零憑證, 純向外。加 --cwd 可把 session 的工作目錄改寫成本機路徑。"""
     wd = watch_dir()
     wd.mkdir(parents=True, exist_ok=True)
-    for url in args.url:
+    parts = []
+    for i, url in enumerate(args.url):
         blob = fetch_bytes(url)
         if blob is None:
+            sys.exit(f"[ks] 第 {i} 片下載失敗, 中止 (連結可能過期, 到 Discord 重打 /link)")
+        parts.append(blob)
+    blob = b"".join(parts)
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile:
+        sys.exit("[ks] 併接後不是有效的 zip — 請確認把 /link 給的連結「全部、依序」都帶上了")
+    written = []
+    for name in zf.namelist():
+        base = os.path.basename(name)  # 只取檔名, 防 zip-slip 路徑穿越
+        if not base or not (base.endswith(".jsonl") or base.endswith(".json")):
             continue
-        try:
-            zf = zipfile.ZipFile(io.BytesIO(blob))
-        except zipfile.BadZipFile:
-            print(f"[ks] 不是有效的 zip (連結對嗎?): {url[:60]}…")
-            continue
-        written = []
-        for name in zf.namelist():
-            base = os.path.basename(name)  # 只取檔名, 防 zip-slip 路徑穿越
-            if not base or not (base.endswith(".jsonl") or base.endswith(".json")):
-                continue
-            data = zf.read(name)
-            if base.endswith(".json") and args.cwd:
-                data = _rewrite_cwd(data, args.cwd)
-            (wd / base).write_bytes(data)
-            written.append(base)
-        if written:
-            print(f"[ks] 已還原到 {wd}: {', '.join(written)}")
-        else:
-            print("[ks] zip 內沒有 .jsonl/.json 可還原")
-    print("[ks] pull 完成。Kiro CLI 現在應該看得到這個 session 了。")
+        data = zf.read(name)
+        if base.endswith(".json") and args.cwd:
+            data = _rewrite_cwd(data, args.cwd)
+        (wd / base).write_bytes(data)
+        written.append(base)
+    if written:
+        print(f"[ks] 已還原到 {wd}: {', '.join(written)} ({len(args.url)} 片)")
+        print("[ks] pull 完成。Kiro CLI 現在應該看得到這個 session 了。")
+    else:
+        print("[ks] zip 內沒有 .jsonl/.json 可還原")
 
 
 def cmd_tail(args) -> None:
@@ -308,8 +320,7 @@ def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="ks-client", description="KiroSync client — 擷取+上行")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    psy = sub.add_parser("sync", help="監看並上行到 Discord")
-    psy.add_argument("--backfill", action="store_true")
+    psy = sub.add_parser("sync", help="監看並把 raw session 快照上傳到 Discord (bot 端渲染)")
     psy.set_defaults(func=cmd_sync)
 
     pt = sub.add_parser("tail", help="只在本機即時印出+存")
@@ -320,12 +331,7 @@ def main(argv=None) -> None:
     po.add_argument("--backfill", action="store_true")
     po.set_defaults(func=cmd_once)
 
-    pi = sub.add_parser("import", help="朔及既往: 把指定舊 session 重讀並上傳")
-    pi.add_argument("session_id", help="session id (可只給前幾碼)")
-    pi.add_argument("--all", action="store_true", help="前綴符合多個時全部匯入")
-    pi.set_defaults(func=cmd_import)
-
-    px = sub.add_parser("export", help="把指定 session 打包上傳 Discord (供他機 pull 還原)")
+    px = sub.add_parser("export", help="一次性把指定 session 快照上傳 Discord (供他機 pull 還原)")
     px.add_argument("session_id", help="session id (可只給前幾碼)")
     px.add_argument("--all", action="store_true", help="前綴符合多個時全部匯出")
     px.set_defaults(func=cmd_export)
