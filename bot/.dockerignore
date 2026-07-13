@@ -1,0 +1,8 @@
+# 不要把祕密與本機狀態打進 image
+.env
+.env.local
+*.db
+*.db-journal
+__pycache__/
+*.pyc
+.pytest_cache/

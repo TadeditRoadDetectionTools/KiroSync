@@ -50,6 +50,24 @@ cp .env.example .env              # 只需填 BOT_TOKEN / GUILD_ID / CATEGORY_ID
 python run.py
 ```
 
+### 用 Docker 跑 bot(建議上雲用)
+bot 只需 outbound 連 Discord、不用開 port,容器化很乾淨。設定用環境變數餵
+(`envcfg` 讓環境變數優先於 `.env`),`ks_bot.db` 導到 `/data` volume 保住 forum/thread 對應。
+
+```bash
+# 專案根目錄, 先填好 bot/.env (BOT_TOKEN / GUILD_ID / CATEGORY_ID)
+docker compose up -d --build       # 讀 docker-compose.yml, 只起 bot 服務
+docker compose logs -f bot         # 看 log
+```
+或不經 compose 直接跑:
+```bash
+docker build -t kirosync-bot ./bot
+docker run -d --name kirosync-bot --env-file bot/.env \
+  -v kirosync_bot_data:/data kirosync-bot
+```
+> 祕密與既有 `*.db` 不會進 image(見 `bot/.dockerignore`);`.env` 只在執行期以
+> `env_file`/`--env-file` 餵進去。
+
 ### 一次性 Discord 設定
 1. **開發者後台** → 你的 App → Bot → 開 **MESSAGE CONTENT INTENT**。
 2. **邀 bot 進 server**,邀請連結要含 `bot` 和 `applications.commands` 兩個 scope

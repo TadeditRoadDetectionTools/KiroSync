@@ -1,0 +1,16 @@
+# 只跑中央 bot。設定從 bot/.env 讀 (env_file 會把它們變成環境變數,
+# envcfg 讓環境變數優先, 所以 image 內不需要 .env)。
+# 用法: docker compose up -d --build
+services:
+  bot:
+    build: ./bot
+    image: kirosync-bot
+    env_file: ./bot/.env
+    environment:
+      DB_PATH: /data/ks_bot.db   # 導到 volume, 保住 forum/thread 對應
+    volumes:
+      - kirosync_bot_data:/data
+    restart: unless-stopped
+
+volumes:
+  kirosync_bot_data:
