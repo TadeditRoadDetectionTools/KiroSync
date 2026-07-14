@@ -1,8 +1,8 @@
 """
-Kiro CLI .jsonl 事件解析 (從 client/watcher.py 移植過來)。
+Kiro CLI .jsonl 事件解析。
 
 架構 B: client 只上傳 raw session, 由 bot 端解析+渲染。所以這套解析邏輯集中在
-bot, 改格式只需動這裡, 不用重佈所有 client。
+bot, 改格式只需動這裡, 不用重佈所有 client (全專案只有這一份解析邏輯)。
 
 Kiro CLI 2.10.0 的 .jsonl: 每行 {"version","kind","data"}:
   kind == "Prompt"           -> 使用者輸入

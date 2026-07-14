@@ -82,6 +82,19 @@ class Store:
         )
         self.db.commit()
 
+    def find_sessions(self, prefix: str) -> list[str]:
+        """依 id 前綴找 session。使用者輸入的 LIKE 萬用字元 (%/_) 會被跳脫,
+        並排除 __info__: 哨兵列 (那是 info thread 的對應, 不是真 session)。"""
+        esc = (prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"))
+        rows = self.db.execute(
+            "SELECT session_id FROM sessions "
+            "WHERE session_id LIKE ? ESCAPE '\\' "
+            "AND session_id NOT LIKE '\\_\\_info\\_\\_:%' ESCAPE '\\' "
+            "ORDER BY session_id",
+            (esc + "%",),
+        ).fetchall()
+        return [r["session_id"] for r in rows]
+
     def get_rendered(self, session_id: str) -> int:
         row = self.db.execute(
             "SELECT rendered FROM sessions WHERE session_id = ?", (session_id,)

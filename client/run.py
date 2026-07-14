@@ -2,6 +2,7 @@
 KiroSync Client 進入點 (擷取 + 上行)。
 
 架構 B: client 只把 raw session 快照 (zip) 上傳; 解析/格式化/貼圖/離線拉取全由 bot 端做。
+client 因此是**無狀態的** — 不解析、不存 DB, 重啟後靠比對檔案 signature 決定要不要上傳。
 
 用法:
     cd client
@@ -9,10 +10,7 @@ KiroSync Client 進入點 (擷取 + 上行)。
     python run.py sync        # 監看並把 raw 快照上傳 Discord (bot 端渲染)
     python run.py export <sid>      # 一次性把某 session 快照上傳 (供他機搬移)
     python run.py pull <url...>     # 從 /link 給的連結還原 session 到本機 (多片依序併接)
-    python run.py tail        # 只在本機即時印出+存 (不碰 Discord)
-    python run.py once        # 掃一次
-    python run.py sessions    # 列出已存 session (本機 DB, 需先跑過 tail/once)
-    python run.py events <sid>
+    python run.py sessions    # 列出本機 session (直接讀 session 目錄)
 """
 
 from __future__ import annotations
@@ -25,11 +23,10 @@ import sys
 import time
 import zipfile
 from pathlib import Path
+from typing import Optional
 
 from envcfg import get, load_env
-from store import Store
 from uplink import SNAP_CHUNK_BYTES, fetch_bytes, post_hello, post_snapshot
-from watcher import Watcher
 
 HERE = Path(__file__).resolve().parent
 ENV = load_env()
@@ -42,10 +39,6 @@ def _e(key, default=None):
 def watch_dir() -> Path:
     wd = _e("WATCH_DIR") or ""
     return Path(wd) if wd else Path.home() / ".kiro" / "sessions" / "cli"
-
-
-def db_path() -> Path:
-    return HERE / (_e("DB_PATH") or "ks_client.db")
 
 
 def interval() -> float:
@@ -64,40 +57,18 @@ def user_name() -> str:
     return _e("USER_NAME") or os.environ.get("USERNAME") or "kiro-user"
 
 
-def include_tools() -> bool:
-    return (_e("SYNC_TOOLS") or "1").strip().lower() not in ("0", "false", "no", "off")
-
-
-def _fmt(evt: dict) -> str:
-    label = {"Prompt": "user", "AssistantMessage": "response",
-             "ToolResults": "tool"}.get(evt["kind"], evt["kind"])
-    text = (evt.get("text") or "").replace("\n", " ")
-    if len(text) > 200:
-        text = text[:200] + "…"
-    natt = len(evt.get("attachments") or [])
-    tag = f" 🖼️x{natt}" if natt else ""
-    return f"[{evt['session_id'][:8]}] {label}:{tag} {text}"
-
-
-def _loop(watcher: Watcher, store: Store) -> None:
+def _read_meta(meta_path: Path) -> dict:
+    if not meta_path.exists():
+        return {}
     try:
-        while True:
-            watcher.scan_once()
-            time.sleep(interval())
-    except KeyboardInterrupt:
-        print("\n[ks] 結束。")
-    finally:
-        store.close()
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return meta if isinstance(meta, dict) else {}
 
 
 def _read_cwd(meta_path: Path) -> Optional[str]:
-    if not meta_path.exists():
-        return None
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        return meta.get("cwd") if isinstance(meta, dict) else None
-    except Exception:
-        return None
+    return _read_meta(meta_path).get("cwd")
 
 
 def _build_session_zip(wd: Path, sid: str):
@@ -110,13 +81,23 @@ def _build_session_zip(wd: Path, sid: str):
         z.write(jsonl_path, arcname=jsonl_path.name)
         if json_path.exists():
             z.write(json_path, arcname=json_path.name)
-            try:
-                meta = json.loads(json_path.read_text(encoding="utf-8"))
-                if isinstance(meta, dict):
-                    title, cwd = meta.get("title"), meta.get("cwd")
-            except Exception:
-                pass
+            meta = _read_meta(json_path)
+            title, cwd = meta.get("title"), meta.get("cwd")
     return buf.getvalue(), title, cwd
+
+
+def _snapshot_session(webhook: str, user: str, wd: Path, sid: str,
+                      chunk: int) -> Optional[tuple[int, int]]:
+    """打包並上傳一個 session 快照, 回傳 (片數, zip 大小)。
+    session 檔在 glob 之後被刪 (Kiro 清理) 等 OSError 不往外丟, 回 None 讓呼叫端略過,
+    不能讓它炸掉 sync 的監看迴圈。"""
+    try:
+        blob, title, cwd = _build_session_zip(wd, sid)
+    except OSError as e:
+        print(f"[ks] 略過 {sid[:8]}: 讀 session 檔失敗 ({e})", flush=True)
+        return None
+    nparts = post_snapshot(webhook, user, sid, blob, title=title, cwd=cwd, chunk_bytes=chunk)
+    return nparts, len(blob)
 
 
 def _snap_params() -> tuple[int, float, float, float]:
@@ -163,7 +144,10 @@ def cmd_sync(args) -> None:
                 if jsize == 0:
                     continue  # 空殼 session 還沒內容, 不送
                 mj = wd / f"{sid}.json"
-                mtime = mj.stat().st_mtime if mj.exists() else 0.0
+                try:
+                    mtime = mj.stat().st_mtime if mj.exists() else 0.0
+                except OSError:  # exists 與 stat 之間被刪
+                    mtime = 0.0
                 if wl and (_read_cwd(mj) or "") not in wl:  # 空清單=全部同步
                     continue
                 sig = (jsize, mtime)
@@ -177,14 +161,15 @@ def cmd_sync(args) -> None:
                     waited = now - first_pending[sid] >= max_wait
                     spaced = now - last_sent_at.get(sid, 0.0) >= min_interval
                     if (idle or waited) and spaced:
-                        blob, title, cwd = _build_session_zip(wd, sid)
-                        nparts = post_snapshot(webhook, user, sid, blob,
-                                               title=title, cwd=cwd, chunk_bytes=chunk)
+                        res = _snapshot_session(webhook, user, wd, sid, chunk)
+                        last_sent_at[sid] = now  # 失敗也記, 下次至少隔 min_interval 再試
+                        if res is None:
+                            continue
+                        nparts, nbytes = res
                         last_sent_sig[sid] = sig
-                        last_sent_at[sid] = now
                         first_pending.pop(sid, None)
-                        print(f"[ks] snapshot {sid[:8]} gen={len(blob)} "
-                              f"{nparts}片 ({len(blob) / 1024:.0f}KB)", flush=True)
+                        print(f"[ks] snapshot {sid[:8]} gen={nbytes} "
+                              f"{nparts}片 ({nbytes / 1024:.0f}KB)", flush=True)
             time.sleep(interval())
     except KeyboardInterrupt:
         print("\n[ks] 結束。")
@@ -210,10 +195,11 @@ def cmd_export(args) -> None:
 
     for jsonl_path in matches:
         sid = jsonl_path.stem
-        blob, title, cwd = _build_session_zip(wd, sid)
-        nparts = post_snapshot(webhook, user, sid, blob,
-                               title=title, cwd=cwd, chunk_bytes=chunk)
-        print(f"[ks] 已匯出 {sid} ({len(blob) / 1024:.0f} KB zip, {nparts} 片) → Discord")
+        res = _snapshot_session(webhook, user, wd, sid, chunk)
+        if res is None:
+            continue
+        nparts, nbytes = res
+        print(f"[ks] 已匯出 {sid} ({nbytes / 1024:.0f} KB zip, {nparts} 片) → Discord")
     print("[ks] export 完成。到 Discord 打 `/link <sid>` 取得下載連結, "
           "目標機器跑: python run.py pull <連結...>")
 
@@ -274,46 +260,34 @@ def cmd_pull(args) -> None:
         print("[ks] zip 內沒有 .jsonl/.json 可還原")
 
 
-def cmd_tail(args) -> None:
-    store = Store(db_path())
-    watcher = Watcher(watch_dir(), store,
-                      on_event=lambda e: print(_fmt(e), flush=True),
-                      backfill=args.backfill, include_tools=include_tools())
-    print(f"[ks] 監看 {watch_dir()}  (Ctrl-C 結束)  backfill={args.backfill}")
-    _loop(watcher, store)
-
-
-def cmd_once(args) -> None:
-    store = Store(db_path())
-    watcher = Watcher(watch_dir(), store,
-                      on_event=lambda e: print(_fmt(e), flush=True),
-                      backfill=args.backfill, include_tools=include_tools())
-    watcher.scan_once()
-    store.close()
+def _count_lines(path: Path) -> int:
+    try:
+        with path.open("rb") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
 
 
 def cmd_sessions(args) -> None:
-    store = Store(db_path())
-    rows = store.db.execute(
-        "SELECT session_id, title, cwd, model, "
-        "(SELECT COUNT(*) FROM events e WHERE e.session_id = s.session_id) AS n "
-        "FROM sessions s ORDER BY updated_at DESC"
-    ).fetchall()
-    for r in rows:
-        print(f"{r['session_id'][:8]}  {r['n']:>3} 則  {r['model'] or '?':<8}  "
-              f"{r['title'] or '(無標題)'}  [{r['cwd'] or ''}]")
-    store.close()
-
-
-def cmd_events(args) -> None:
-    store = Store(db_path())
-    rows = store.db.execute(
-        "SELECT seq, kind, text FROM events WHERE session_id LIKE ? ORDER BY seq ASC",
-        (args.session_id + "%",),
-    ).fetchall()
-    for r in rows:
-        print(_fmt({"session_id": args.session_id, "kind": r["kind"], "text": r["text"]}))
-    store.close()
+    """列出本機 Kiro session。直接讀 session 目錄, 不需要任何本機狀態。"""
+    wd = watch_dir()
+    if not wd.exists():
+        sys.exit(f"找不到 session 目錄 {wd} (Kiro CLI 用過嗎? 或用 WATCH_DIR 指定)")
+    files = sorted(wd.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        print(f"[ks] {wd} 裡沒有 session。")
+        return
+    for jf in files:
+        sid = jf.stem
+        meta = _read_meta(wd / f"{sid}.json")
+        state = meta.get("session_state")
+        model = None
+        if isinstance(state, dict):
+            info = state.get("rts_model_state")
+            info = info.get("model_info") if isinstance(info, dict) else None
+            model = info.get("model_name") if isinstance(info, dict) else None
+        print(f"{sid[:8]}  {_count_lines(jf):>3} 則  {model or '?':<8}  "
+              f"{meta.get('title') or '(無標題)'}  [{meta.get('cwd') or ''}]")
 
 
 def main(argv=None) -> None:
@@ -322,14 +296,6 @@ def main(argv=None) -> None:
 
     psy = sub.add_parser("sync", help="監看並把 raw session 快照上傳到 Discord (bot 端渲染)")
     psy.set_defaults(func=cmd_sync)
-
-    pt = sub.add_parser("tail", help="只在本機即時印出+存")
-    pt.add_argument("--backfill", action="store_true")
-    pt.set_defaults(func=cmd_tail)
-
-    po = sub.add_parser("once", help="掃一次")
-    po.add_argument("--backfill", action="store_true")
-    po.set_defaults(func=cmd_once)
 
     px = sub.add_parser("export", help="一次性把指定 session 快照上傳 Discord (供他機 pull 還原)")
     px.add_argument("session_id", help="session id (可只給前幾碼)")
@@ -342,12 +308,8 @@ def main(argv=None) -> None:
                                   "(連 permissions 可讀/可寫路徑一起換), 讓它落在本機資料夾")
     pp.set_defaults(func=cmd_pull)
 
-    ps = sub.add_parser("sessions", help="列出 session")
+    ps = sub.add_parser("sessions", help="列出本機 session")
     ps.set_defaults(func=cmd_sessions)
-
-    pe = sub.add_parser("events", help="印某 session 事件")
-    pe.add_argument("session_id")
-    pe.set_defaults(func=cmd_events)
 
     args = p.parse_args(argv)
     args.func(args)

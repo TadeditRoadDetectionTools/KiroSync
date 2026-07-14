@@ -1,8 +1,7 @@
 # KiroSync (ks)
 
 把 Kiro CLI 的對話即時同步到 Discord。監看 `~/.kiro/sessions/cli/*.jsonl`,一個
-session 對應一條 Discord thread。完整規劃見 [PLAN.md](PLAN.md)、原理見
-[docs/原理筆記.md](docs/原理筆記.md)。
+session 對應一條 Discord thread,並支援用 Discord 當中繼在多台機器之間搬移 session。
 
 ## 架構:兩個獨立部署(client 只傳 raw,bot 端渲染)
 
@@ -37,7 +36,8 @@ client 監看的是 Kiro CLI 寫在本機的 session 檔,所以那台機器要�
   - macOS/Linux:`~/.kiro/sessions/cli/`
   - 每個 session 有 `<id>.jsonl`(逐事件對話)、`<id>.json`(標題/cwd/model)、`<id>.lock`。
 - **與 agent 無關**:不管你用哪個 agent(`kiro-cli chat`、`--agent xxx`),對話都會寫進上面的檔,client 照抓。不用改 Kiro 設定,也不用綁特定 agent。
-- **查目前有哪些 session**:`cd client && python run.py sessions`,或 Kiro 內建 `kiro-cli chat --list-sessions -f json`。
+- **查目前有哪些 session**:`cd client && python run.py sessions`(直接讀上面那個目錄),
+  或 Kiro 內建 `kiro-cli chat --list-sessions -f json`。
 
 ---
 
@@ -98,7 +98,8 @@ docker run -d --name kirosync-bot --env-file bot/.env \
 
 ## `client/` — 擷取 + 上行(每位使用者機器上跑)
 
-零依賴(純標準庫)。client 只把 raw 快照上傳,不做解析(渲染在 bot 端)。
+零依賴(純標準庫)、**無狀態**:client 只把 raw 快照上傳,不做解析(渲染在 bot 端),
+也不存任何本機 DB。
 
 ```bash
 cd client
@@ -106,12 +107,7 @@ cp .env.example .env        # 填 WEBHOOK_URL / USER_NAME
 python run.py sync          # 監看並把 raw 快照 (zip) 切片上傳 (bot 端渲染)
 python run.py export <sid>  # 一次性把某 session 快照上傳 (供他機搬移)
 python run.py pull <url...> # 搬移: 把 /link 給的連結(多片依序)還原 session 到本機
-
-# 不碰 Discord 的本機模式:
-python run.py tail          # 即時印出 + 存 ks_client.db
-python run.py once
-python run.py sessions      # 列出本機 session (需先跑過 tail/once)
-python run.py events <sid>
+python run.py sessions      # 列出本機 session (直接讀 session 目錄)
 ```
 
 **`WEBHOOK_URL` 從哪來?** bot 上線後,到 Discord 的 `kiro-command` 頻道看**釘選訊息**,
@@ -139,10 +135,10 @@ python run.py events <sid>
 > 分片連結是 Discord CDN 簽章連結,但 `/link` 每次都**當場重簽**,不會拿到過期的。
 
 `.env` 欄位:`WEBHOOK_URL`、`USER_NAME`、`SYNC_WORKSPACES`(逗號分隔 cwd,空=全部)、
-`WATCH_DIR`(留空=自動抓 `~/.kiro/sessions/cli`)、`POLL_INTERVAL`、`DB_PATH`、
+`WATCH_DIR`(留空=自動抓 `~/.kiro/sessions/cli`)、`POLL_INTERVAL`、
 快照調校:`SNAP_CHUNK_MB`(切片上限)、`SNAP_DEBOUNCE`(停止變動幾秒後上傳)、
 `SNAP_MIN_INTERVAL`(兩次上傳最小間隔)、`SNAP_MAX_WAIT`(持續變動時最遲上傳間隔)。
-`SYNC_TOOLS` 已移到 **bot 端**(改用 bot 的 `INCLUDE_TOOLS`,因為渲染在 bot 做)。
+要不要渲染工具呼叫改由 **bot 端**的 `INCLUDE_TOOLS` 決定(因為渲染在 bot 做)。
 
 ---
 
@@ -157,3 +153,9 @@ python run.py events <sid>
 其他人不需要自己的 bot、也不用跟你的機器連線 —— 只要拿到那條 webhook URL,把
 `WEBHOOK_URL` / `USER_NAME` 填進自己 `client/.env` 跑 `python run.py sync` 即可。
 Bot 靠 payload 裡的 `USER_NAME` 分流到各自的 forum。
+
+> **信任模型:guild 成員彼此互信。** webhook URL 釘選在人人可見的 `kiro-command`
+> 頻道,而 webhook 沒有身分驗證 —— 拿到 URL 的任何人都能用任意 `USER_NAME` 上傳,
+> 也就能假冒別人或灌垃圾快照。這是刻意的取捨(換來 client 零設定、零憑證),
+> 所以請只在**自己人**的私有 guild 使用;若 guild 有不受信任的成員,至少把
+> `kiro-command` 頻道改為私有,不要讓 webhook URL 外流。

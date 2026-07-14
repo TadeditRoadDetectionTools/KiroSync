@@ -135,19 +135,17 @@ class KiroBot(discord.Client):
         """回傳指定 session 最新快照各分片的下載連結。連結由 Discord 在此刻讀取時
         重新簽章, 所以每次都是新鮮的 (不會過期)。來源 client 關機也拉得到。"""
         sid = (session_id or "").strip()
-        rows = self.store.db.execute(
-            "SELECT session_id FROM sessions WHERE session_id LIKE ?", (sid + "%",),
-        ).fetchall()
-        if not rows:
+        matches = self.store.find_sessions(sid)
+        if not matches:
             await interaction.followup.send(
                 f"找不到符合 `{sid}` 的 session (它同步過嗎?)", ephemeral=True)
             return
-        if len(rows) > 1:
-            listing = "\n".join(f"• `{r['session_id']}`" for r in rows[:10])
+        if len(matches) > 1:
+            listing = "\n".join(f"• `{m}`" for m in matches[:10])
             await interaction.followup.send(
                 f"符合多個 session, 請給更完整的 id:\n{listing}", ephemeral=True)
             return
-        full_sid = rows[0]["session_id"]
+        full_sid = matches[0]
         snap = self.store.get_snapshot(full_sid)
         if not snap or not snap.get("msg_ids"):
             await interaction.followup.send(
@@ -396,6 +394,11 @@ class KiroBot(discord.Client):
             print(f"[bot] 讀 snap 附件失敗: {e}")
             return False
         key = (s, gen)
+        # client 對同一 session 是依序送世代的; 新世代的片到了, 代表更舊世代已確定
+        # 收不齊 (有片上傳失敗) — 清掉殘片, 讓 _snap_buf 有界, 不會無限堆積
+        for stale in [k for k in self._snap_buf if k[0] == s and k != key]:
+            self._snap_buf.pop(stale, None)
+            self._snap_msgs.pop(stale, None)
         self._snap_buf.setdefault(key, {})[p] = data
         self._snap_msgs.setdefault(key, {})[p] = message.id
         if len(self._snap_buf[key]) < n:
@@ -452,6 +455,12 @@ class KiroBot(discord.Client):
         lines = jsonl_text.splitlines()
         rendered = self.store.get_rendered(s)
         total = len(lines)
+        if rendered > total:
+            # 行數倒退 = session 檔被重寫變短 (append-only 假設被打破)。已貼的訊息
+            # 收不回來, 但進度要重設到新檔尾端, 否則之後的新行永遠不會再渲染。
+            print(f"[bot] {s[:8]} 行數倒退 ({rendered} -> {total}), 重設渲染進度")
+            self.store.set_rendered(s, total)
+            rendered = total
         for i in range(rendered, total):
             ev = parse_line(lines[i], i, self.include_tools)
             if ev is not None:
@@ -459,11 +468,16 @@ class KiroBot(discord.Client):
         if total > rendered:
             self.store.set_rendered(s, total)
 
-        # 更新「可離線拉取」指標: 記本世代分片, 刪上一世代 (容量有界)
+        # 更新「可離線拉取」指標: 記本世代分片, 刪掉已被取代的舊分片 (容量有界)。
+        # 不只比 gen — client 重啟後會把同一世代重送一次, 訊息 id 是新的,
+        # 舊的同世代分片一樣是孤兒, 不刪會在 ingest 頻道慢慢堆積。
         old = self.store.get_snapshot(s)
         self.store.set_snapshot(s, gen, channel_id, msg_ids)
-        if old and old.get("gen") != gen:
-            await self._delete_msgs(old.get("channel_id"), old.get("msg_ids") or [])
+        if old:
+            current = set(msg_ids)
+            stale = [m for m in (old.get("msg_ids") or []) if m not in current]
+            if stale:
+                await self._delete_msgs(old.get("channel_id"), stale)
 
     async def _post_event(self, thread: "discord.Thread", ev: dict) -> None:
         """把一個解析後事件貼到 thread: 文字(加角色標籤/切段) + 圖片附件。"""
