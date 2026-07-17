@@ -10,7 +10,13 @@ services:
       DB_PATH: /data/ks_bot.db   # 導到 volume, 保住 forum/thread 對應
     volumes:
       - kirosync_bot_data:/data
-    restart: unless-stopped
+    # 斷線要自己回來, 但設定錯不會因為重啟就變對 — 無限重啟只會把真正的錯誤
+    # 洗掉。試幾次就停下, 用 `docker compose ps -a` 看 Exited、logs 看原因。
+    restart: on-failure:3
 
 volumes:
   kirosync_bot_data:
+    # 釘死實際名稱。預設 compose 會加專案 (目錄) 名當前綴, 換台機器 clone 到不同
+    # 名字的資料夾就會變成另一顆 volume — 備份/還原時打錯名字不會報錯, 只會默默
+    # 建一顆空的, 等發現時 DB 已經沒了。釘死就沒這問題。
+    name: kirosync_bot_data
