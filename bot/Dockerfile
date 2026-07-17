@@ -15,7 +15,10 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && useradd -m app \
     && mkdir -p /data && chown app:app /data
 
-COPY . .
+# --chown 讓容器內非 root 的 app 擁有程式碼:
+# 就算來源檔被 host ACL 設成 0660 (others 無讀), owner=app 仍讀得到,
+# 避免 pull 進新檔後又出現 run.py Permission denied。
+COPY --chown=app:app . .
 
 USER app
 VOLUME ["/data"]
