@@ -37,6 +37,15 @@ def install() -> types.ModuleType:
         def default(cls):
             return cls()
 
+    class Role:
+        def __init__(self, rid: int):
+            self.id = rid
+
+    class File:
+        def __init__(self, fp, filename=None):
+            self.fp = fp
+            self.filename = filename
+
     class _CommandTree:
         def __init__(self, client):
             self.client = client
@@ -64,6 +73,8 @@ def install() -> types.ModuleType:
     d.Client = Client
     d.Intents = Intents
     d.app_commands = app_commands
+    d.Role = Role
+    d.File = File
 
     sys.modules["discord"] = d
     sys.modules["discord.app_commands"] = app_commands

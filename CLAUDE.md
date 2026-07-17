@@ -79,6 +79,35 @@ client 機器  ──webhook POST──▶  Discord #kiro-ingest  ──Gateway�
    所以來源機關機也拉得到。套用快照時刪掉已被取代的舊分片訊息(不只比世代——同世代
    重送的舊訊息也是孤兒,一樣刪),容量有界。
 
+### `/summary`:總結也是「bot 端一手包辦」
+
+`/summary` 是架構 B 的延伸,不是新管道:總結要的東西 bot 全都有——`snapshots` 表記著
+每個 session 最新快照的分片訊息 id,隨時能從 Discord 下載併回 zip(`_snapshot_blob()`,
+跟 `/link` 共用 `_snapshot_parts()`)。所以來源機離線也能總結,**client 一行都沒改**。
+
+反過來說,「叫 client 產生摘要」在這個架構下做不到:bot→client 沒有任何通道(client
+只有一條**寫入用** webhook,連讀 Discord 的憑證都沒有),要做就得發憑證+輪詢,等於
+放棄「純向外、零憑證」。這是選 bot 端跑的決定性理由,不只是「client 可能沒開」。
+
+- 純邏輯在 [bot/summary.py](bot/summary.py)(選行/統計/文字稿/報告),不碰 discord 物件所以好測;
+  LLM 呼叫在 [bot/gemini.py](bot/gemini.py)(`aiohttp` 延遲 import,純邏輯零依賴可測)。
+- **兩個游標互不干涉**:`sessions.rendered` 是「貼到 thread 的進度」,`sessions.summarized`
+  是「總結到的進度」。日期模式跑完也會推進 `summarized`(兩種模式終點都是「現在」)。
+- **降級是設計的一部分**:沒填 `GEMINI_API_KEY` 或呼叫失敗 → 只出統計卡,指令不會壞。
+- **錯誤處理只有一份**:`gemini.call()`(單一 model)回 `(text, err)` 把原因**原樣帶出來**,
+  `gemini.call_chain()`(依序退場)回 `(text, 用的 model, [(model, err)…])`。產品路徑
+  (`_run_summary`)吞掉 err 只 log 並降級,診斷路徑(`_check_engine`)把 err 印給人看。
+  要加新的 LLM 錯誤處理就改 `call()`——別在上層另外攔,那會讓 `/summary-check` 瞎掉。
+- **model 鏈**:`GEMINI_MODELS` 可填多個依序試(`parse_models()` 吃逗號/空白),第一個成功
+  的就用,報告標明用了哪個。`_run_summary` 在一輪報告內會把**成功的 model 挪到鏈首**——
+  否則 12 個 session 會對已知不通的 model 白打 12 次 404。前面失敗的錯誤即使最後成功也要
+  往上帶,`/summary-check` 才講得出「這個 model 每次都在白試」。
+- `/summary-check` 的兩個檢查都是**實測**而非查表:真的打一次 Gemini、真的抓一個快照回來
+  解開(`snapshots` 表有紀錄 ≠ ingest 頻道的分片訊息還在)。沒填 key 是 `WARN` 不是 `FAIL`。
+- Kiro 的 `meta.timestamp` 單位是逆向來的(秒/毫秒都可能),一律走 `summary.normalize_ts()`。
+- 權限**在 runtime 判定**,不能用 `default_permissions` —— 那會讓 Discord 在指令層先擋掉
+  沒有管理權的人,`/summary-access` 授權的身分組就永遠進不來。
+
 ### 狀態放哪:只有 bot 有
 
 **client 是完全無狀態的**,不存 DB。`sync`/`export`/`pull`/`sessions` 全靠現場讀
@@ -86,15 +115,17 @@ session 目錄;`sync` 重啟後用檔案 signature 重新決定要不要上傳(�
 bot 端靠 `rendered` 去重,所以不會重複貼)。
 
 bot 端 [bot/store.py](bot/store.py) 的 SQLite 只存無法重算的東西:`user_forums`
-(user → forum)、`sessions`(session → thread + `rendered` 進度)、`snapshots`
-(最新世代的分片 message id)、`kv`(自建頻道 id、webhook URL)。對話內容不存這裡——
-真相在各 client 的 `.jsonl` 與 Discord thread 裡。
+(user → forum)、`sessions`(session → thread + `rendered` / `summarized` 進度)、
+`snapshots`(最新世代的分片 message id)、`kv`(自建頻道 id、webhook URL、
+`/summary` 授權身分組)。對話內容不存這裡——真相在各 client 的 `.jsonl` 與
+Discord thread 裡。加欄位時記得 `_migrate()` 也要補(`CREATE IF NOT EXISTS` 不會加欄位)。
 
 ### 零手動設定
 
 bot 開機自建 `kiro-ingest`(隱藏)+ webhook、`kiro-command`(公開),id 記在 `kv` 表沿用。
 頻道解析順序:`.env` 指定 > `kv` 裡之前自建的 > 現在自建。webhook URL 自動貼到 command 頻道
-並釘選。使用者只需填 `BOT_TOKEN` / `GUILD_ID` / `CATEGORY_ID`。
+並釘選。使用者只需填 `BOT_TOKEN` / `GUILD_ID` / `CATEGORY_ID`(`GEMINI_API_KEY` 只影響
+`/summary` 出不出語意摘要,不填也不會壞)。
 
 ### envcfg 的環境變數優先
 
