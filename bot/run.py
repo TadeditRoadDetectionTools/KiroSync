@@ -28,6 +28,9 @@ def main() -> None:
         "command_channel_id": get(env, "COMMAND_CHANNEL_ID"),
         "include_tools": (get(env, "INCLUDE_TOOLS") or "1").strip().lower()
         not in ("0", "false", "no", "off"),
+        "gemini_api_key": get(env, "GEMINI_API_KEY"),
+        # 可填多個 (逗號/空白分隔) 依序嘗試; GEMINI_MODEL 是單數的舊名, 一併接受
+        "gemini_models": get(env, "GEMINI_MODELS") or get(env, "GEMINI_MODEL"),
     }
     db_path = HERE / (get(env, "DB_PATH") or "ks_bot.db")
     from bot import run_bot  # 延遲載入, 讓缺 discord.py 時錯誤更清楚

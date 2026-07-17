@@ -126,6 +126,41 @@ def _extract_ts(data: dict) -> Optional[int]:
     return None
 
 
+def _load_line(line: str) -> Optional[dict]:
+    """把一行讀成 dict; 空行/壞行/非物件回 None。"""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        evt = json.loads(line)
+    except Exception:
+        return None
+    return evt if isinstance(evt, dict) else None
+
+
+def line_timestamp(line: str) -> Optional[int]:
+    """只取一行的 timestamp, 不做完整渲染 (掃描用, 不必為了讀時間去解圖片位元組)。
+    取不到回 None。單位由呼叫端正規化 — 見 summary.normalize_ts。"""
+    evt = _load_line(line)
+    if evt is None:
+        return None
+    data = evt.get("data")
+    return _extract_ts(data) if isinstance(data, dict) else None
+
+
+def line_kinds(line: str) -> tuple:
+    """回 (事件 kind, content 各項的 kind 清單); 空行/壞行回 (None, [])。
+    給統計用 — 讓 JSON 結構的知識維持只有這個模組知道。"""
+    evt = _load_line(line)
+    if evt is None:
+        return None, []
+    data = evt.get("data")
+    content = data.get("content") if isinstance(data, dict) else None
+    kinds = [c.get("kind") for c in content
+             if isinstance(c, dict)] if isinstance(content, list) else []
+    return evt.get("kind", "Unknown"), kinds
+
+
 def parse_line(line: str, seq: int, include_tools: bool = True) -> Optional[dict]:
     """把 .jsonl 的一行解析成 {kind, text, attachments, ts}; 空行回 None。
     壞行不當掉: 回一個 kind=ParseError 的 dict。"""

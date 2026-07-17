@@ -71,6 +71,59 @@ class TestStore(unittest.TestCase):
         self.assertEqual(self.store.find_sessions("%"), [])           # % 也不是
         self.assertEqual(self.store.find_sessions("a"), ["a_b789", "axb000"])
 
+    def test_summarized_cursor_independent_of_rendered(self):
+        self.store.set_thread("sid-1", 333, 111)
+        self.assertEqual(self.store.get_summarized("sid-1"), 0)
+        self.store.set_rendered("sid-1", 20)
+        self.store.set_summarized("sid-1", 12)
+        self.assertEqual(self.store.get_summarized("sid-1"), 12)
+        self.assertEqual(self.store.get_rendered("sid-1"), 20)  # 兩個游標互不影響
+        self.assertEqual(self.store.get_thread("sid-1"), 333)
+
+    def test_summarized_upsert_without_existing_row(self):
+        self.store.set_summarized("fresh", 3)
+        self.assertEqual(self.store.get_summarized("fresh"), 3)
+
+    def test_list_sessions_scopes(self):
+        self.store.set_forum("alice", 100)
+        self.store.set_forum("bob", 200)
+        self.store.set_thread("a1", 1, 100)
+        self.store.set_thread("a2", 2, 100)
+        self.store.set_thread("b1", 3, 200)
+        self.store.set_thread("__info__:alice", 9, 100)
+
+        allr = self.store.list_sessions()
+        self.assertEqual([r["session_id"] for r in allr], ["a1", "a2", "b1"])
+        self.assertEqual([r["user_key"] for r in allr], ["alice", "alice", "bob"])
+
+        alice = self.store.list_sessions(user_key="alice")
+        self.assertEqual([r["session_id"] for r in alice], ["a1", "a2"])
+
+        one = self.store.list_sessions(prefix="b")
+        self.assertEqual([r["session_id"] for r in one], ["b1"])
+        self.assertEqual(one[0]["user_key"], "bob")
+
+    def test_list_sessions_unknown_user_returns_empty(self):
+        self.store.set_thread("a1", 1, 100)
+        self.assertEqual(self.store.list_sessions(user_key="nobody"), [])
+
+    def test_list_sessions_without_forum_owner(self):
+        # forum 沒有對應 user_forums 列時, user_key 給 None (不能因此漏掉 session)
+        self.store.set_thread("orphan", 1, 999)
+        rows = self.store.list_sessions()
+        self.assertEqual(rows, [{"session_id": "orphan", "user_key": None}])
+
+    def test_summary_roles_roundtrip(self):
+        self.assertEqual(self.store.get_summary_roles(), [])
+        self.store.set_summary_roles([30, 10, 10, 20])
+        self.assertEqual(self.store.get_summary_roles(), [10, 20, 30])  # 去重+排序
+        self.store.set_summary_roles([])
+        self.assertEqual(self.store.get_summary_roles(), [])
+
+    def test_summary_roles_broken_kv_tolerated(self):
+        self.store.set_kv("summary_roles", "{壞掉")
+        self.assertEqual(self.store.get_summary_roles(), [])
+
     def test_kv_roundtrip(self):
         self.assertIsNone(self.store.get_kv("webhook_url"))
         self.store.set_kv("webhook_url", "https://a")
@@ -79,7 +132,7 @@ class TestStore(unittest.TestCase):
 
 
 class TestMigration(unittest.TestCase):
-    def test_old_sessions_table_gains_rendered_column(self):
+    def test_old_sessions_table_gains_new_columns(self):
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "old.db"
             db = sqlite3.connect(str(db_path))
@@ -95,8 +148,31 @@ class TestMigration(unittest.TestCase):
             try:
                 self.assertEqual(store.get_thread("s1"), 10)      # 舊資料還在
                 self.assertEqual(store.get_rendered("s1"), 0)      # 新欄位補 0
+                self.assertEqual(store.get_summarized("s1"), 0)
                 store.set_rendered("s1", 9)
+                store.set_summarized("s1", 4)
                 self.assertEqual(store.get_rendered("s1"), 9)
+                self.assertEqual(store.get_summarized("s1"), 4)
+            finally:
+                store.close()
+
+    def test_db_with_rendered_but_no_summarized(self):
+        # 上一版的 DB (已有 rendered, 還沒 summarized) 也要能無痛升級
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "mid.db"
+            db = sqlite3.connect(str(db_path))
+            db.execute(
+                "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, thread_id INTEGER, "
+                "forum_id INTEGER, rendered INTEGER NOT NULL DEFAULT 0)"
+            )
+            db.execute("INSERT INTO sessions VALUES ('s1', 10, 20, 7)")
+            db.commit()
+            db.close()
+
+            store = Store(db_path)
+            try:
+                self.assertEqual(store.get_rendered("s1"), 7)   # 既有進度不能被重設
+                self.assertEqual(store.get_summarized("s1"), 0)
             finally:
                 store.close()
 

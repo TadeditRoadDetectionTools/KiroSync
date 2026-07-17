@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     thread_id  INTEGER,
     forum_id   INTEGER,
-    rendered   INTEGER NOT NULL DEFAULT 0  -- 已貼到 thread 的 .jsonl 行數 (架構 B: bot 端渲染進度)
+    rendered   INTEGER NOT NULL DEFAULT 0,  -- 已貼到 thread 的 .jsonl 行數 (架構 B: bot 端渲染進度)
+    summarized INTEGER NOT NULL DEFAULT 0   -- 已被 /summary 總結到的 .jsonl 行數 (diff 游標)
 );
 CREATE TABLE IF NOT EXISTS kv (
     k TEXT PRIMARY KEY,
@@ -38,6 +39,14 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 """
 
+# info thread 的哨兵列 (__info__:<user>) 不是真 session, 對外查詢一律排除
+_NOT_SENTINEL = "session_id NOT LIKE '\\_\\_info\\_\\_:%' ESCAPE '\\'"
+
+
+def _esc_like(s: str) -> str:
+    """跳脫使用者輸入裡的 LIKE 萬用字元, 讓 %/_ 只當普通字元比對。"""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 
 class Store:
     def __init__(self, db_path: Path):
@@ -48,10 +57,12 @@ class Store:
         self.db.commit()
 
     def _migrate(self) -> None:
-        # 舊 DB 的 sessions 表可能沒有 rendered 欄位; 補上 (CREATE IF NOT EXISTS 不會加欄位)
+        # 舊 DB 的 sessions 表可能缺欄位; 補上 (CREATE IF NOT EXISTS 不會加欄位)
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(sessions)").fetchall()}
-        if "rendered" not in cols:
-            self.db.execute("ALTER TABLE sessions ADD COLUMN rendered INTEGER NOT NULL DEFAULT 0")
+        for col in ("rendered", "summarized"):
+            if col not in cols:
+                self.db.execute(
+                    f"ALTER TABLE sessions ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
 
     def get_forum(self, user_key: str) -> Optional[int]:
         row = self.db.execute(
@@ -82,18 +93,29 @@ class Store:
         )
         self.db.commit()
 
-    def find_sessions(self, prefix: str) -> list[str]:
-        """依 id 前綴找 session。使用者輸入的 LIKE 萬用字元 (%/_) 會被跳脫,
-        並排除 __info__: 哨兵列 (那是 info thread 的對應, 不是真 session)。"""
-        esc = (prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"))
+    def list_sessions(self, *, user_key: str = None, prefix: str = None) -> list[dict]:
+        """列出 session, 回 [{session_id, user_key}] (依 id 排序)。
+        兩個條件都不給 = 全部。用來支撐 /summary 的三種範圍 (全部/某使用者/某 session)。
+        一律排除 __info__: 哨兵列 (那是 info thread 的對應, 不是真 session)。"""
+        where = [f"s.{_NOT_SENTINEL}"]
+        params: list = []
+        if user_key is not None:
+            where.append("s.forum_id = (SELECT forum_id FROM user_forums WHERE user_key = ?)")
+            params.append(user_key)
+        if prefix is not None:
+            where.append("s.session_id LIKE ? ESCAPE '\\'")
+            params.append(_esc_like(prefix) + "%")
         rows = self.db.execute(
-            "SELECT session_id FROM sessions "
-            "WHERE session_id LIKE ? ESCAPE '\\' "
-            "AND session_id NOT LIKE '\\_\\_info\\_\\_:%' ESCAPE '\\' "
-            "ORDER BY session_id",
-            (esc + "%",),
+            "SELECT s.session_id, u.user_key FROM sessions s "
+            "LEFT JOIN user_forums u ON u.forum_id = s.forum_id "
+            "WHERE " + " AND ".join(where) + " ORDER BY s.session_id",
+            params,
         ).fetchall()
-        return [r["session_id"] for r in rows]
+        return [{"session_id": r["session_id"], "user_key": r["user_key"]} for r in rows]
+
+    def find_sessions(self, prefix: str) -> list[str]:
+        """依 id 前綴找 session id。使用者輸入的 LIKE 萬用字元 (%/_) 會被跳脫。"""
+        return [r["session_id"] for r in self.list_sessions(prefix=prefix)]
 
     def get_rendered(self, session_id: str) -> int:
         row = self.db.execute(
@@ -108,6 +130,32 @@ class Store:
             (session_id, n),
         )
         self.db.commit()
+
+    def get_summarized(self, session_id: str) -> int:
+        """已被 /summary 總結到的行數 (diff 游標); 沒總結過回 0。"""
+        row = self.db.execute(
+            "SELECT summarized FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return int(row["summarized"]) if row and row["summarized"] is not None else 0
+
+    def set_summarized(self, session_id: str, n: int) -> None:
+        self.db.execute(
+            "INSERT INTO sessions(session_id, summarized) VALUES(?, ?) "
+            "ON CONFLICT(session_id) DO UPDATE SET summarized = excluded.summarized",
+            (session_id, n),
+        )
+        self.db.commit()
+
+    def get_summary_roles(self) -> list[int]:
+        """除了 Discord 原生管理權限外, 額外可用 /summary 的身分組 id。"""
+        try:
+            ids = json.loads(self.get_kv("summary_roles") or "[]")
+        except Exception:
+            return []
+        return [int(i) for i in ids] if isinstance(ids, list) else []
+
+    def set_summary_roles(self, role_ids) -> None:
+        self.set_kv("summary_roles", json.dumps(sorted({int(i) for i in role_ids})))
 
     def get_snapshot(self, session_id: str) -> Optional[dict]:
         row = self.db.execute(

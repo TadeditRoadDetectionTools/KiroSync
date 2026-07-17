@@ -1,10 +1,13 @@
-"""bot/util.py chunk() 的測試。"""
+"""bot/util.py 的測試: chunk() 與 read_snapshot_zip()。"""
 
+import io
+import json
 import unittest
+import zipfile
 
 import _paths  # noqa: F401
 
-from util import chunk
+from util import chunk, read_snapshot_zip
 
 
 class TestChunk(unittest.TestCase):
@@ -41,6 +44,47 @@ class TestChunk(unittest.TestCase):
         pieces = chunk("\nabcdef", 3)
         self.assertTrue(all(pieces))
         self.assertTrue(all(len(p) <= 3 for p in pieces))
+
+
+def _zip(entries: dict) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, data in entries.items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+class TestReadSnapshotZip(unittest.TestCase):
+    def test_jsonl_and_meta(self):
+        blob = _zip({"s.jsonl": '{"kind":"Prompt"}\n',
+                     "s.json": json.dumps({"title": "標題", "cwd": "/p"})})
+        jsonl, meta = read_snapshot_zip(blob)
+        self.assertEqual(jsonl, '{"kind":"Prompt"}\n')
+        self.assertEqual(meta["title"], "標題")
+
+    def test_missing_meta_is_normal(self):
+        jsonl, meta = read_snapshot_zip(_zip({"s.jsonl": "x\n"}))
+        self.assertEqual(jsonl, "x\n")
+        self.assertEqual(meta, {})
+
+    def test_broken_meta_tolerated(self):
+        jsonl, meta = read_snapshot_zip(_zip({"s.jsonl": "x\n", "s.json": "{壞掉"}))
+        self.assertEqual(meta, {})
+
+    def test_non_dict_meta_tolerated(self):
+        _, meta = read_snapshot_zip(_zip({"s.jsonl": "x\n", "s.json": "[1,2]"}))
+        self.assertEqual(meta, {})
+
+    def test_nested_paths(self):
+        jsonl, _ = read_snapshot_zip(_zip({"sub/dir/s.jsonl": "y\n"}))
+        self.assertEqual(jsonl, "y\n")
+
+    def test_bad_zip_returns_none(self):
+        self.assertIsNone(read_snapshot_zip(b"not a zip"))
+
+    def test_undecodable_bytes_replaced_not_raised(self):
+        jsonl, _ = read_snapshot_zip(_zip({"s.jsonl": b"\xff\xfe bad\n"}))
+        self.assertIn("bad", jsonl)
 
 
 if __name__ == "__main__":
