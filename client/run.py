@@ -54,6 +54,29 @@ def workspaces() -> list[str]:
     return [w.strip() for w in raw.split(",") if w.strip()]
 
 
+def _norm_path(p: str) -> str:
+    """正規化路徑供比對: 統一分隔線、去結尾斜線、Windows 上不分大小寫。
+    這樣 D:/Programs/X、D:\\Programs\\X\\、d:\\programs\\x 都會對上同一個。"""
+    if not p:
+        return ""
+    return os.path.normcase(os.path.normpath(p.strip()))
+
+
+def _in_workspaces(cwd: str, wl: list[str]) -> bool:
+    """cwd 是否落在任一限定資料夾內 (含子資料夾)。空清單 = 全部同步。
+    在 D:\\Work 底下任何子專案開的 session 都算 D:\\Work 的一部分。"""
+    if not wl:
+        return True
+    c = _norm_path(cwd)
+    if not c:
+        return False
+    for w in wl:
+        w = _norm_path(w)
+        if w and (c == w or c.startswith(w + os.sep)):
+            return True
+    return False
+
+
 def user_name() -> str:
     return _e("USER_NAME") or os.environ.get("USERNAME") or "kiro-user"
 
@@ -149,7 +172,7 @@ def cmd_sync(args) -> None:
                     mtime = mj.stat().st_mtime if mj.exists() else 0.0
                 except OSError:  # exists 與 stat 之間被刪
                     mtime = 0.0
-                if wl and (_read_cwd(mj) or "") not in wl:  # 空清單=全部同步
+                if not _in_workspaces(_read_cwd(mj) or "", wl):  # 空清單=全部同步
                     continue
                 sig = (jsize, mtime)
                 if sig != observed.get(sid):
