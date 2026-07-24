@@ -5,6 +5,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# 使用者可能給值加引號; 中文 Windows 的輸入法還會打出全形/彎引號 (跟 ASCII 是不同字元)。
+# 這些全部當外圍引號剝掉, 免得 URL 黏著怪引號而失效。
+_QUOTES = "\"'“”‘’„‚＂＇「」『』"
+
+
+def _dequote(v: str) -> str:
+    """去掉值外圍的引號 (含全形/彎引號) 與空白; 內側殘留空白也一併清掉。"""
+    return v.strip().strip(_QUOTES).strip()
+
 
 def load_env(path: str | None = None) -> dict:
     p = Path(path) if path else Path(__file__).resolve().parent / ".env"
@@ -30,7 +39,7 @@ def load_env(path: str | None = None) -> dict:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        data[k.strip()] = v.strip().strip('"').strip("'")
+        data[k.strip()] = _dequote(v)
     return data
 
 
