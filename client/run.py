@@ -7,6 +7,7 @@ client 因此是**無狀態的** — 不解析、不存 DB, 重啟後靠比對�
 用法:
     cd client
     cp .env.example .env      # 填好 WEBHOOK_URL / USER_NAME 後
+    python run.py check       # 自檢 .env (WEBHOOK_URL / USER_NAME 有沒有填好)
     python run.py sync        # 監看並把 raw 快照上傳 Discord (bot 端渲染)
     python run.py export <sid>      # 一次性把某 session 快照上傳 (供他機搬移)
     python run.py pull <url...>     # 從 /link 給的連結還原 session 到本機 (多片依序併接)
@@ -268,6 +269,12 @@ def _count_lines(path: Path) -> int:
         return 0
 
 
+def cmd_check(args) -> None:
+    """自檢 .env 設定 (WEBHOOK_URL / USER_NAME / Kiro 目錄)。"""
+    import check
+    raise SystemExit(check.run(["--no-net"] if args.no_net else []))
+
+
 def cmd_sessions(args) -> None:
     """列出本機 Kiro session。直接讀 session 目錄, 不需要任何本機狀態。"""
     wd = watch_dir()
@@ -293,6 +300,10 @@ def cmd_sessions(args) -> None:
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="ks-client", description="KiroSync client — 擷取+上行")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    pc = sub.add_parser("check", help="自檢 .env (WEBHOOK_URL / USER_NAME 有沒有填好)")
+    pc.add_argument("--no-net", action="store_true", help="不連 Discord, 只做本機格式檢查")
+    pc.set_defaults(func=cmd_check)
 
     psy = sub.add_parser("sync", help="監看並把 raw session 快照上傳到 Discord (bot 端渲染)")
     psy.set_defaults(func=cmd_sync)

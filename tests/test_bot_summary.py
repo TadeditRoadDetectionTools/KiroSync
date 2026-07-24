@@ -315,7 +315,7 @@ class TestSummaryCheck(SummaryTestBase):
         self.assertIn("服務正常", text)
         self.assertIn("model=`good-1`", text)  # 指出用的是哪個
         self.assertIn("1/1 個 session 有快照", text)
-        self.assertNotIn("❌", text)
+        self.assertNotIn("[失敗]", text)
 
     def test_engine_failure_reports_reason(self):
         self.bot.gemini_key = "bad-key"
@@ -362,7 +362,7 @@ class TestSummaryCheck(SummaryTestBase):
         self.assertIn("退到第 2 個 model=`good-2`", text)
         self.assertIn("跳過 `dead-1`", text)
         self.assertIn("HTTP 404", text)
-        self.assertNotIn("❌", text)  # 不是壞掉, 只是有浪費
+        self.assertNotIn("[失敗]", text)  # 不是壞掉, 只是有浪費
 
     def test_missing_key_is_warn_not_fail(self):
         # 沒填 key 是「降級」不是「壞掉」—— /summary 仍然可用
@@ -370,7 +370,7 @@ class TestSummaryCheck(SummaryTestBase):
         text = self._check()
         self.assertIn("可用, 但有降級", text)
         self.assertIn("GEMINI_API_KEY", text)
-        self.assertNotIn("❌", text)
+        self.assertNotIn("[失敗]", text)
 
     def test_no_sessions_warns(self):
         text = self._check()
@@ -382,7 +382,7 @@ class TestSummaryCheck(SummaryTestBase):
         self.store.set_thread("dead1234", 1, 100)
         self.store.set_snapshot("dead1234", "g1", 42, [1])
         text = self._check()
-        self.assertIn("❌", text)
+        self.assertIn("[失敗]", text)
         self.assertIn("抓不回", text)
         self.assertIn("dead1234", text)
 
