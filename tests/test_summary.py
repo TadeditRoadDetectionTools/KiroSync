@@ -172,8 +172,8 @@ class TestFormatReport(unittest.TestCase):
     def test_groups_by_user(self):
         r = format_report([self._entry(user="alice"), self._entry(user="bob")],
                           scope_label="全部使用者", since_label="距上次總結")
-        self.assertIn("👤 alice", r)
-        self.assertIn("👤 bob", r)
+        self.assertIn("## alice", r)
+        self.assertIn("## bob", r)
         self.assertIn("修 bug", r)
         self.assertIn("摘要內容", r)
         self.assertIn("全部使用者", r)
@@ -206,8 +206,8 @@ class TestFormatHealth(unittest.TestCase):
     def test_all_ok(self):
         r = format_health([check("引擎", OK, "可用"), check("快照", OK, "3/3")])
         self.assertIn("服務正常", r)
-        self.assertIn("✅", r)
-        self.assertNotIn("❌", r)
+        self.assertIn("[OK]", r)
+        self.assertNotIn("[失敗]", r)
 
     def test_worst_status_decides_verdict(self):
         r = format_health([check("引擎", OK, "可用"), check("快照", WARN, "部分")])
@@ -219,7 +219,7 @@ class TestFormatHealth(unittest.TestCase):
         # 只說「不可用」對使用者沒有行動價值, 原因一定要印出來
         r = format_health([check("引擎", FAIL, "呼叫失敗",
                                  "HTTP 400 — API key not valid")])
-        self.assertIn("❌", r)
+        self.assertIn("[失敗]", r)
         self.assertIn("API key not valid", r)
 
     def test_multiline_detail_flattened(self):

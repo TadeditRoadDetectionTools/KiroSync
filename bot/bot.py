@@ -114,7 +114,7 @@ class KiroBot(discord.Client):
 
         @tree.command(name="ping", description="檢查 KiroSync bot 是否在線")
         async def _ping(interaction: discord.Interaction):
-            await interaction.response.send_message("🟢 pong", ephemeral=True)
+            await interaction.response.send_message("pong", ephemeral=True)
 
         @tree.command(name="status", description="顯示 KiroSync bot 狀態")
         async def _status_cmd(interaction: discord.Interaction):
@@ -127,7 +127,7 @@ class KiroBot(discord.Client):
                 secs = int((datetime.datetime.now().astimezone() - self._started).total_seconds())
                 up = f"{secs // 3600}h {secs % 3600 // 60}m"
             await interaction.response.send_message(
-                f"🟢 上線中\n使用者論壇: {nf}\n同步的 session: {nt}\n運行時間: {up}",
+                f"上線中\n使用者論壇: {nf}\n同步的 session: {nt}\n運行時間: {up}",
                 ephemeral=True,
             )
 
@@ -248,7 +248,7 @@ class KiroBot(discord.Client):
             return
         joined = " ".join(f'"{u}"' for u in urls)
         cmd = f"python run.py pull {joined}"
-        header = f"📦 **Session 搬移包** `{full_sid[:8]}` ({len(urls)} 片)  加 `--cwd \"<路徑>\"` 可換資料夾"
+        header = f"**Session 搬移包** `{full_sid[:8]}` ({len(urls)} 片)  加 `--cwd \"<路徑>\"` 可換資料夾"
         if len(header) + len(cmd) + 12 <= 1990:
             await interaction.followup.send(f"{header}\n```\n{cmd}\n```", ephemeral=True)
         else:  # 片太多、指令太長 -> 分段送純文字, 使用者自行接成一行
@@ -438,7 +438,7 @@ class KiroBot(discord.Client):
             fp = io.BytesIO(report.encode("utf-8"))
             stamp = datetime.datetime.now().astimezone().strftime("%Y%m%d-%H%M")
             await interaction.followup.send(
-                "📋 **KiroSync 總結** (內容較長, 見附件)",
+                "**KiroSync 總結** (內容較長, 見附件)",
                 file=discord.File(fp, filename=f"summary-{stamp}.md"))
             return
         for piece in chunk(report, REPORT_PIECE):
@@ -499,10 +499,10 @@ class KiroBot(discord.Client):
                 print("[bot] slash commands 已同步")
             except Exception as e:
                 print(f"[bot] slash 同步失敗 (是否用 applications.commands scope 邀請?): {e}")
-            await self._status(f"🟢 **Bot 上線** `{_now()}`")
+            await self._status(f"**Bot 上線** `{_now()}`")
             await self._publish_webhook()
         else:
-            await self._status(f"🔁 **Bot 重新連線** `{_now()}`")
+            await self._status(f"**Bot 重新連線** `{_now()}`")
 
     async def _resolve_channels(self) -> None:
         """解析 ingest 與 command 頻道 (env 指定 > bot 之前自建 > 現在自建)。"""
@@ -613,7 +613,7 @@ class KiroBot(discord.Client):
         if not isinstance(dest, (discord.TextChannel, discord.Thread)):
             return
         # command 頻道公開; 直接把 URL 貼出來並釘選 (已存在就更新)
-        marker = "🔗 **Client Webhook URL**"
+        marker = "**Client Webhook URL**"
         body = f"{marker}\n把這條填進 client 的 `.env` 的 `WEBHOOK_URL`:\n{hook.url}"
         try:
             pins = await dest.pins()
@@ -637,7 +637,7 @@ class KiroBot(discord.Client):
     async def close(self) -> None:
         # Ctrl-C / 正常關閉時, discord.py 會呼叫這裡; 趁連線還在先送下線訊息
         try:
-            await self._status(f"🔴 **Bot 下線** `{_now()}`")
+            await self._status(f"**Bot 下線** `{_now()}`")
         except Exception:
             pass
         await super().close()
@@ -808,7 +808,7 @@ class KiroBot(discord.Client):
             if tid:
                 th = self.get_channel(tid) or await self._fetch(tid)
                 if isinstance(th, discord.Thread):
-                    await th.send(f"🔌 重新連線 `{ts}`")
+                    await th.send(f"重新連線 `{ts}`")
                     return
             created = await forum.create_thread(
                 name=f"ℹ️ {user}"[:100],
@@ -880,7 +880,7 @@ class KiroBot(discord.Client):
             return
         try:
             await info.send(
-                f"🆕 **新 thread 已建立** → <#{thread.id}>\n"
+                f"**新 thread 已建立** → <#{thread.id}>\n"
                 f"Title: {title or '(no title)'}\n"
                 f"Session ID: {session_id}\n"
                 f"Time: {when}"

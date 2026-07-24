@@ -134,7 +134,7 @@ def stats_line(st: dict) -> str:
 
 
 OK, WARN, FAIL = "ok", "warn", "fail"
-_ICONS = {OK: "✅", WARN: "⚠️", FAIL: "❌"}
+_ICONS = {OK: "[OK]", WARN: "[注意]", FAIL: "[失敗]"}
 
 
 def check(name: str, status: str, summary: str, detail: str = "") -> dict:
@@ -147,9 +147,9 @@ def format_health(checks: List[dict]) -> str:
     worst = FAIL if any(c["status"] == FAIL for c in checks) else (
         WARN if any(c["status"] == WARN for c in checks) else OK)
     verdict = {OK: "服務正常", WARN: "可用, 但有降級", FAIL: "有項目不可用"}[worst]
-    out = [f"🩺 **`/summary` 服務檢查** — {_ICONS[worst]} {verdict}"]
+    out = [f"**`/summary` 服務檢查** — {_ICONS[worst]} {verdict}"]
     for c in checks:
-        out.append(f"\n{_ICONS.get(c['status'], '•')} **{c['name']}** — {c['summary']}")
+        out.append(f"\n{_ICONS.get(c['status'], '-')} **{c['name']}** — {c['summary']}")
         if c.get("detail"):
             out.append("> " + " ".join(str(c["detail"]).split()))  # 壓成一行才不破版
     return "\n".join(out)
@@ -159,7 +159,7 @@ def format_report(entries: List[dict], *, scope_label: str, since_label: str,
                   note: str = "", skipped: List[str] = None) -> str:
     """把各 session 的結果組成報告 (依使用者分段)。entries 每筆:
     {user_key, session_id, title, stats, summary}"""
-    lines = [f"📋 **KiroSync 總結** — {scope_label} · {since_label}"]
+    lines = [f"**KiroSync 總結** — {scope_label} · {since_label}"]
     if note:
         lines.append(f"_{note}_")
     if not entries:
@@ -168,7 +168,7 @@ def format_report(entries: List[dict], *, scope_label: str, since_label: str,
     for e in entries:
         by_user.setdefault(e.get("user_key") or "(未知使用者)", []).append(e)
     for user in sorted(by_user):
-        lines.append(f"\n## 👤 {user}")
+        lines.append(f"\n## {user}")
         for e in by_user[user]:
             title = e.get("title") or e["session_id"][:8]
             lines.append(f"\n### {title} `{e['session_id'][:8]}`")
@@ -176,6 +176,6 @@ def format_report(entries: List[dict], *, scope_label: str, since_label: str,
             if e.get("summary"):
                 lines.append(e["summary"])
     if skipped:
-        lines.append(f"\n⚠️ 略過 {len(skipped)} 個 session (快照分片已不可用, "
+        lines.append(f"\n注意: 略過 {len(skipped)} 個 session (快照分片已不可用, "
                      f"請在來源機重跑 sync): " + ", ".join(f"`{s[:8]}`" for s in skipped))
     return "\n".join(lines)
