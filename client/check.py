@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 import urllib.error
@@ -91,9 +90,9 @@ def check_user_name(raw: str | None) -> None:
     if raw and raw.strip():
         _mark("ok", "USER_NAME 已填", raw.strip())
         return
-    fallback = os.environ.get("USERNAME") or os.environ.get("USER") or "kiro-user"
-    _mark("warn", "USER_NAME 未填",
-          f"bot 會改用系統帳號「{fallback}」分流你的 forum; 想指定就填進 .env")
+    _mark("fail", "USER_NAME 未填",
+          "必填: bot 用它把你的對話分流到專屬 forum。請在 .env 設定 "
+          "(多台機器要填一樣的, 否則會拆成多個 forum)")
 
 
 def check_kiro_dir(watch_dir: str | None) -> None:

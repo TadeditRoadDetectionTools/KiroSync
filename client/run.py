@@ -78,7 +78,13 @@ def _in_workspaces(cwd: str, wl: list[str]) -> bool:
 
 
 def user_name() -> str:
-    return _e("USER_NAME") or os.environ.get("USERNAME") or "kiro-user"
+    # 必填: USER_NAME 是 bot 分流到你專屬 forum 的鍵。以前留空會退回系統帳號,
+    # 但那會讓多台機器各自用不同的系統名 -> 拆成多個 forum、也可能撞名。
+    name = (_e("USER_NAME") or "").strip()
+    if not name:
+        sys.exit(".env 缺 USER_NAME —— 請在 client/.env 設定你的識別名 "
+                 "(bot 用它把你的對話分流到專屬 forum; 多台機器要填一樣的)")
+    return name
 
 
 def _read_meta(meta_path: Path) -> dict:

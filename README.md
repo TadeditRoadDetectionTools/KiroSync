@@ -303,7 +303,7 @@ python run.py sessions      # 列出本機 session (直接讀 session 目錄)
 > 切片;過大只是**片數變多**,`/link` 會把每片都列出、`pull` 依序併接,沒有硬上限。
 > 分片連結是 Discord CDN 簽章連結,但 `/link` 每次都**當場重簽**,不會拿到過期的。
 
-`.env` 欄位:`WEBHOOK_URL`、`USER_NAME`、`SYNC_WORKSPACES`(逗號分隔 cwd,空=全部)、
+`.env` 欄位:`WEBHOOK_URL`、`USER_NAME`(**必填**,多台機器填一樣的才會歸同一 forum;留空拒絕啟動)、`SYNC_WORKSPACES`(逗號分隔 cwd,空=全部)、
 `WATCH_DIR`(留空=自動抓 `~/.kiro/sessions/cli`)、`POLL_INTERVAL`、
 快照調校:`SNAP_CHUNK_MB`(切片上限)、`SNAP_DEBOUNCE`(停止變動幾秒後上傳)、
 `SNAP_MIN_INTERVAL`(兩次上傳最小間隔)、`SNAP_MAX_WAIT`(持續變動時最遲上傳間隔)。
