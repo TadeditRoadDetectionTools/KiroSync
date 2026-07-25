@@ -24,6 +24,27 @@ class TestStore(unittest.TestCase):
         self.store.set_forum("alice", 222)  # 重建 forum 後覆蓋
         self.assertEqual(self.store.get_forum("alice"), 222)
 
+    def test_forum_per_category(self):
+        # 同一使用者在不同分類有不同 forum; 預設分類鍵=0, 路由分類鍵=分類 id
+        self.store.set_forum("alice", 100)            # 家用 (category_id=0)
+        self.store.set_forum("alice", 500, category_id=1529)  # 路由到某分類
+        self.assertEqual(self.store.get_forum("alice"), 100)              # 預設
+        self.assertEqual(self.store.get_forum("alice", 1529), 500)       # 路由
+        self.assertIsNone(self.store.get_forum("alice", 9999))           # 沒設的分類
+        # 各分類獨立覆蓋, 不互相影響
+        self.store.set_forum("alice", 501, category_id=1529)
+        self.assertEqual(self.store.get_forum("alice", 1529), 501)
+        self.assertEqual(self.store.get_forum("alice"), 100)
+
+    def test_list_sessions_aggregates_across_user_forums(self):
+        # 一個人有多個 forum (多分類) 時, 依 user 過濾要涵蓋全部
+        self.store.set_forum("alice", 100)                    # 家用
+        self.store.set_forum("alice", 300, category_id=42)    # 路由分類
+        self.store.set_thread("home1", 1, 100)
+        self.store.set_thread("proj1", 2, 300)
+        rows = self.store.list_sessions(user_key="alice")
+        self.assertEqual(sorted(r["session_id"] for r in rows), ["home1", "proj1"])
+
     def test_thread_roundtrip(self):
         self.assertIsNone(self.store.get_thread("sid-1"))
         self.store.set_thread("sid-1", 333, 111)
@@ -173,6 +194,29 @@ class TestMigration(unittest.TestCase):
             try:
                 self.assertEqual(store.get_rendered("s1"), 7)   # 既有進度不能被重設
                 self.assertEqual(store.get_summarized("s1"), 0)
+            finally:
+                store.close()
+
+    def test_old_user_forums_single_key_migrates_to_composite(self):
+        # 舊 DB: user_forums 只有 (user_key PK, forum_id)。升級後要變複合鍵,
+        # 既有列一律歸到 category_id=0 (家用), 不能遺失。
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "oldforum.db"
+            db = sqlite3.connect(str(db_path))
+            db.execute("CREATE TABLE user_forums (user_key TEXT PRIMARY KEY, forum_id INTEGER NOT NULL)")
+            db.execute("INSERT INTO user_forums VALUES ('alice', 111)")
+            db.execute("INSERT INTO user_forums VALUES ('bob', 222)")
+            db.commit()
+            db.close()
+
+            store = Store(db_path)
+            try:
+                self.assertEqual(store.get_forum("alice"), 111)       # 舊列歸 category_id=0
+                self.assertEqual(store.get_forum("bob"), 222)
+                # 升級後仍能新增路由分類的 forum
+                store.set_forum("alice", 900, category_id=42)
+                self.assertEqual(store.get_forum("alice", 42), 900)
+                self.assertEqual(store.get_forum("alice"), 111)       # 家用不受影響
             finally:
                 store.close()
 

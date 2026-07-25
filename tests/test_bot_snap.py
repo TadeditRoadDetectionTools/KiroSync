@@ -173,7 +173,7 @@ class TestApplySnapshot(unittest.TestCase):
         self.thread = FakeThread()
         self.deleted = []
 
-        async def fake_forum(user):
+        async def fake_forum(user, category_id=None):
             return object()
 
         async def fake_thread(forum, sid, title, cwd, user):

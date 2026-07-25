@@ -12,6 +12,8 @@ client 因此是**無狀態的** — 不解析、不存 DB, 重啟後靠比對�
     python run.py export <sid>      # 一次性把某 session 快照上傳 (供他機搬移)
     python run.py pull <url...>     # 從 /link 給的連結還原 session 到本機 (多片依序併接)
     python run.py sessions    # 列出本機 session (直接讀 session 目錄)
+    python run.py route add <資料夾> <分類ID>   # 把某資料夾的 session 送到指定 Discord 分類
+    python run.py route list / route remove <資料夾>
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
+import routes as routes_mod
 from envcfg import get, load_env
 from uplink import SNAP_CHUNK_BYTES, fetch_bytes, post_hello, post_snapshot
 
@@ -117,8 +120,9 @@ def _build_session_zip(wd: Path, sid: str):
 
 
 def _snapshot_session(webhook: str, user: str, wd: Path, sid: str,
-                      chunk: int) -> Optional[tuple[int, int]]:
+                      chunk: int, cat: Optional[str] = None) -> Optional[tuple[int, int]]:
     """打包並上傳一個 session 快照, 回傳 (片數, zip 大小)。
+    cat = 目標 Discord 分類 ID (資料夾路由算出來的); None = bot 端進個人 forum。
     session 檔在 glob 之後被刪 (Kiro 清理) 等 OSError 不往外丟, 回 None 讓呼叫端略過,
     不能讓它炸掉 sync 的監看迴圈。"""
     try:
@@ -126,7 +130,8 @@ def _snapshot_session(webhook: str, user: str, wd: Path, sid: str,
     except OSError as e:
         print(f"[ks] 略過 {sid[:8]}: 讀 session 檔失敗 ({e})", flush=True)
         return None
-    nparts = post_snapshot(webhook, user, sid, blob, title=title, cwd=cwd, chunk_bytes=chunk)
+    nparts = post_snapshot(webhook, user, sid, blob, title=title, cwd=cwd,
+                           cat=cat, chunk_bytes=chunk)
     return nparts, len(blob)
 
 
@@ -152,9 +157,11 @@ def cmd_sync(args) -> None:
     wd = watch_dir()
     chunk, debounce, min_interval, max_wait = _snap_params()
 
+    route_list = routes_mod.load_routes()  # 啟動時載入一次; 改路由後重跑 sync 生效
+
     post_hello(webhook, user)  # 讓 bot 先建好 forum + 資訊 thread
     print(f"[ks] sync(快照模式) 中: {wd} -> Discord  使用者={user}  "
-          f"切片={chunk // 1024 // 1024}MB  去抖={debounce}s")
+          f"切片={chunk // 1024 // 1024}MB  去抖={debounce}s  路由={len(route_list)} 條")
 
     observed: dict[str, tuple] = {}       # sid -> 最近在磁碟上看到的 (jsonl_size, meta_mtime)
     last_change: dict[str, float] = {}    # sid -> 最近一次變動的時刻
@@ -178,7 +185,8 @@ def cmd_sync(args) -> None:
                     mtime = mj.stat().st_mtime if mj.exists() else 0.0
                 except OSError:  # exists 與 stat 之間被刪
                     mtime = 0.0
-                if not _in_workspaces(_read_cwd(mj) or "", wl):  # 空清單=全部同步
+                cwd = _read_cwd(mj) or ""
+                if not _in_workspaces(cwd, wl):  # 空清單=全部同步
                     continue
                 sig = (jsize, mtime)
                 if sig != observed.get(sid):
@@ -191,7 +199,8 @@ def cmd_sync(args) -> None:
                     waited = now - first_pending[sid] >= max_wait
                     spaced = now - last_sent_at.get(sid, 0.0) >= min_interval
                     if (idle or waited) and spaced:
-                        res = _snapshot_session(webhook, user, wd, sid, chunk)
+                        cat = routes_mod.category_for(cwd, route_list)
+                        res = _snapshot_session(webhook, user, wd, sid, chunk, cat=cat)
                         last_sent_at[sid] = now  # 失敗也記, 下次至少隔 min_interval 再試
                         if res is None:
                             continue
@@ -223,9 +232,11 @@ def cmd_export(args) -> None:
             print("   ", m.stem)
         return
 
+    route_list = routes_mod.load_routes()
     for jsonl_path in matches:
         sid = jsonl_path.stem
-        res = _snapshot_session(webhook, user, wd, sid, chunk)
+        cat = routes_mod.category_for(_read_cwd(wd / f"{sid}.json") or "", route_list)
+        res = _snapshot_session(webhook, user, wd, sid, chunk, cat=cat)
         if res is None:
             continue
         nparts, nbytes = res
@@ -304,6 +315,32 @@ def cmd_check(args) -> None:
     raise SystemExit(check.run(["--no-net"] if args.no_net else []))
 
 
+def cmd_route_add(args) -> None:
+    cid = (args.category_id or "").strip()
+    if not cid.isdigit():
+        sys.exit("category_id 要填 Discord 分類的數字 ID "
+                 "(Discord 開開發者模式 -> 右鍵分類 -> 複製頻道 ID; 或到 command 頻道打 /categories), "
+                 f"收到: {args.category_id!r}")
+    routes_mod.add_route(args.folder, cid, args.label or "")
+    tag = f"（{args.label}）" if args.label else ""
+    print(f"[ks] 已設定路由: {args.folder} -> 分類 {cid}{tag}")
+
+
+def cmd_route_list(args) -> None:
+    rs = routes_mod.load_routes()
+    if not rs:
+        print("[ks] 尚未設定任何路由 (所有 session 進個人 forum)。")
+        return
+    for r in rs:
+        lbl = f"（{r.get('label')}）" if r.get("label") else ""
+        print(f"{r.get('folder')} -> 分類 {r.get('category_id')}{lbl}")
+
+
+def cmd_route_remove(args) -> None:
+    ok = routes_mod.remove_route(args.folder)
+    print(f"[ks] 已移除路由: {args.folder}" if ok else f"[ks] 沒有符合的路由: {args.folder}")
+
+
 def cmd_sessions(args) -> None:
     """列出本機 Kiro session。直接讀 session 目錄, 不需要任何本機狀態。"""
     wd = watch_dir()
@@ -350,6 +387,19 @@ def main(argv=None) -> None:
 
     ps = sub.add_parser("sessions", help="列出本機 session")
     ps.set_defaults(func=cmd_sessions)
+
+    pr = sub.add_parser("route", help="設定『資料夾 → Discord 分類 ID』路由")
+    rsub = pr.add_subparsers(dest="action", required=True)
+    ra = rsub.add_parser("add", help="新增/覆蓋一條路由")
+    ra.add_argument("folder", help="本機資料夾 (含子資料夾都算)")
+    ra.add_argument("category_id", help="Discord 分類的數字 ID")
+    ra.add_argument("--label", default="", help="給人看的顯示名 (選填)")
+    ra.set_defaults(func=cmd_route_add)
+    rl = rsub.add_parser("list", help="列出目前路由")
+    rl.set_defaults(func=cmd_route_list)
+    rr = rsub.add_parser("remove", help="移除一條路由")
+    rr.add_argument("folder", help="要移除的資料夾")
+    rr.set_defaults(func=cmd_route_remove)
 
     args = p.parse_args(argv)
     args.func(args)

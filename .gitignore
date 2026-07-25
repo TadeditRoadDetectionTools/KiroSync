@@ -2,6 +2,7 @@
 .env
 *.db
 *.db-journal
+client/routes.json
 
 # 交接用的匯出檔 (ksdb.tar.gz 內含 webhook URL, image tar 很大) — 絕不進版控
 /dist/

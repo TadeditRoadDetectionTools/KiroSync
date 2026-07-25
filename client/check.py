@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import routes as routes_mod
 from envcfg import get, load_env
 
 HERE = Path(__file__).resolve().parent
@@ -108,6 +109,16 @@ def check_kiro_dir(watch_dir: str | None) -> None:
         _mark("ok", f"Kiro session 目錄正常 ({n} 個 session)", str(wd))
 
 
+def check_routes() -> None:
+    rs = routes_mod.load_routes()
+    if not rs:
+        return  # 沒設路由 = 全進個人 forum, 不算問題, 不用提
+    lines = "; ".join(
+        f"{r.get('folder')}→{r.get('category_id')}" + (f"（{r.get('label')}）" if r.get("label") else "")
+        for r in rs)
+    _mark("ok", f"資料夾路由 {len(rs)} 條", lines)
+
+
 def run(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="ks-check", description="KiroSync client 設定自檢")
@@ -122,6 +133,7 @@ def run(argv=None) -> int:
     check_webhook(get(env, "WEBHOOK_URL"), use_net=not args.no_net)
     check_user_name(get(env, "USER_NAME"))
     check_kiro_dir(get(env, "WATCH_DIR"))
+    check_routes()
 
     print()
     c = _counts

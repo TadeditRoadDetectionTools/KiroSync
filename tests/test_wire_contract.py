@@ -80,6 +80,19 @@ class TestSnapRoundTrip(unittest.TestCase):
         self.assertEqual(len(gens), 1)
         self.assertTrue(all(g for g in gens))
 
+    def test_cat_present_survives(self):
+        # 有資料夾路由: cat 帶 Discord 分類 ID, bot 端要能讀到 h["cat"]
+        got = self._roundtrip(zip_bytes=b"x", cat="1529383717565370479")
+        h, _ = got[0]
+        self.assertIsNotNone(h)
+        self.assertEqual(h.get("cat"), "1529383717565370479")
+
+    def test_cat_absent_when_no_route(self):
+        # 沒路由: header 不帶 cat, bot 端 h.get("cat") -> None (fallback 個人 forum)
+        got = self._roundtrip(zip_bytes=b"x")
+        h, _ = got[0]
+        self.assertIsNone(h.get("cat"))
+
     def test_tricky_title_survives_json_escaping(self):
         # title 含換行 / 引號 — json.dumps 會轉義, 不能破壞「header 只佔第一行」的約定
         title = '多行\n標題 "引號" \\ 反斜線'

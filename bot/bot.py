@@ -141,6 +141,20 @@ class KiroBot(discord.Client):
                 f"把這條填進 client 的 `.env` 的 `WEBHOOK_URL`:\n{url}", ephemeral=True
             )
 
+        @tree.command(name="categories", description="列出伺服器分類與 ID (給 client 設資料夾路由用)")
+        async def _categories(interaction: discord.Interaction):
+            guild = interaction.guild or self.get_guild(int(self.cfg["guild_id"]))
+            cats = list(guild.categories) if guild else []
+            if not cats:
+                await interaction.response.send_message("這個伺服器沒有分類。", ephemeral=True)
+                return
+            lines = "\n".join(f"`{c.id}`  {c.name}" for c in cats)
+            await interaction.response.send_message(
+                "**分類 ↔ ID**  client 端設路由: "
+                "`python run.py route add <資料夾> <ID>`\n" + lines,
+                ephemeral=True,
+            )
+
         @tree.command(name="link",
                       description="取得指定 session 的搬移下載連結 (需先在來源機 export)")
         @discord.app_commands.describe(session_id="session id (可只給前幾碼)")
@@ -211,6 +225,7 @@ class KiroBot(discord.Client):
                 "`/ping` 檢查在線\n"
                 "`/status` bot 狀態\n"
                 "`/webhook` 取得 client webhook URL\n"
+                "`/categories` 列出分類與 ID (給 client 設資料夾路由)\n"
                 "`/link <sid>` 取得某 session 搬移包的下載連結 (先在來源機 export)\n"
                 "`/summary [scope] [target] [since]` 彙整 session 變化摘要 (管理員)\n"
                 "`/summary-check` 檢查 /summary 服務是否可用 (管理員)\n"
@@ -726,7 +741,7 @@ class KiroBot(discord.Client):
         title = h.get("title") or m.get("title") or s[:8]
         cwd = h.get("cwd") or m.get("cwd") or ""
 
-        forum = await self.ensure_forum(user)
+        forum = await self.ensure_forum(user, h.get("cat"))
         if forum is None:
             return
         thread = await self.ensure_thread(forum, s, title, cwd, user)
@@ -824,24 +839,38 @@ class KiroBot(discord.Client):
                 print(f"[bot] 釘選 info 貼文失敗: {e}")
             print(f"[bot] 建立 info thread for {user} @ {ts}")
 
-    async def ensure_forum(self, user_key: str) -> Optional[discord.ForumChannel]:
-        async with self._lock(f"forum:{user_key}"):
-            fid = self.store.get_forum(user_key)
+    async def ensure_forum(self, user_key: str, category_id=None) -> Optional[discord.ForumChannel]:
+        """取/建使用者在某分類下的 forum。category_id = client 路由來的 Discord 分類 id;
+        找不到或非分類 -> fallback 預設分類 (家用 forum)。儲存鍵: 預設分類用 0, 其餘用分類 id。"""
+        guild = self.get_guild(int(self.cfg["guild_id"]))
+        if guild is None:
+            print(f"[bot] 找不到 guild {self.cfg['guild_id']}")
+            return None
+        default_cat = int(self.cfg["category_id"])
+        target = None
+        if category_id and str(category_id).isdigit():
+            c = guild.get_channel(int(category_id))
+            if isinstance(c, discord.CategoryChannel):
+                target = c
+            else:
+                print(f"[bot] 路由分類 {category_id} 找不到或非分類, fallback 個人 forum")
+        if target is None or target.id == default_cat:
+            c = guild.get_channel(default_cat)  # 家用/預設分類, 儲存鍵用 0 (跟舊 DB 相容)
+            if not isinstance(c, discord.CategoryChannel):
+                print(f"[bot] category_id {default_cat} 不是分類頻道")
+                return None
+            target, store_cat = c, 0
+        else:
+            store_cat = target.id
+        async with self._lock(f"forum:{user_key}:{store_cat}"):
+            fid = self.store.get_forum(user_key, store_cat)
             if fid:
                 ch = self.get_channel(fid) or await self._fetch(fid)
                 if isinstance(ch, discord.ForumChannel):
                     return ch  # 還在 -> 用它
-            guild = self.get_guild(int(self.cfg["guild_id"]))
-            if guild is None:
-                print(f"[bot] 找不到 guild {self.cfg['guild_id']}")
-                return None
-            category = guild.get_channel(int(self.cfg["category_id"]))
-            if not isinstance(category, discord.CategoryChannel):
-                print(f"[bot] category_id {self.cfg['category_id']} 不是分類頻道")
-                return None
-            forum = await guild.create_forum(name=f"kiro-{user_key}"[:100], category=category)
-            self.store.set_forum(user_key, forum.id)
-            print(f"[bot] 建立 forum: kiro-{user_key} ({forum.id})")
+            forum = await guild.create_forum(name=f"kiro-{user_key}"[:100], category=target)
+            self.store.set_forum(user_key, forum.id, store_cat)
+            print(f"[bot] 建立 forum: kiro-{user_key} 於分類「{target.name}」({forum.id})")
             return forum
 
     async def ensure_thread(

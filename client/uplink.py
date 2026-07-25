@@ -5,8 +5,9 @@ Client 端「上行」: 把一則事件 POST 到 Discord Webhook。
 
 架構 B 的 wire format (bot 端 parse_ingest 對應):
     Hello:  KSV1 {"u":..,"k":"Hello","s":"","ts":..}\n
-    Snap :  KSV1 {"u":..,"s":..,"k":"Snap","g":世代,"p":片號,"n":總片,"title":..,"cwd":..}
+    Snap :  KSV1 {"u":..,"s":..,"k":"Snap","g":世代,"p":片號,"n":總片,"title":..,"cwd":..[,"cat":分類ID]}
             附件 = session zip 的一個切片; bot 收齊併回、渲染、並留存供離線 pull。
+            cat = 資料夾路由算出的 Discord 分類 ID (選填); 缺 = bot 端進個人 forum。
 """
 
 from __future__ import annotations
@@ -65,8 +66,8 @@ def _post(url: str, content: str, log: Callable[[str], None]) -> None:
 def post_snapshot(
     webhook_url: str, user: str, session_id: str, zip_bytes: bytes,
     *, title: Optional[str] = None, cwd: Optional[str] = None,
-    gen: Optional[str] = None, chunk_bytes: int = SNAP_CHUNK_BYTES,
-    log: Callable[[str], None] = print,
+    cat: Optional[str] = None, gen: Optional[str] = None,
+    chunk_bytes: int = SNAP_CHUNK_BYTES, log: Callable[[str], None] = print,
 ) -> int:
     """架構 B 的上行: 把一個 session 的 zip (內含 .jsonl+.json) 依 chunk 上限切片,
     每片一則 k:Snap 訊息 (帶 g 世代 / p 片號 / n 總片) 上傳。bot 收齊後併回 zip:
@@ -83,6 +84,8 @@ def post_snapshot(
             "u": user, "s": session_id, "k": "Snap",
             "g": gen, "p": p, "n": n, "title": title, "cwd": cwd,
         }
+        if cat:  # 只在有路由時才帶; 缺欄位 = 舊行為 (bot 進個人 forum), 向後相容
+            header["cat"] = str(cat)
         content = "KSV1 " + json.dumps(header, ensure_ascii=False)
         _post_multipart(webhook_url, content, f"{session_id}.{gen}.p{p}.zip", part, log)
     return n

@@ -17,8 +17,10 @@ from typing import Optional
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user_forums (
-    user_key TEXT PRIMARY KEY,
-    forum_id INTEGER NOT NULL
+    user_key    TEXT NOT NULL,
+    category_id INTEGER NOT NULL DEFAULT 0,  -- 0 = 家用/預設分類的 forum; 其餘 = 路由到的 Discord 分類 id
+    forum_id    INTEGER NOT NULL,
+    PRIMARY KEY (user_key, category_id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
@@ -63,18 +65,33 @@ class Store:
             if col not in cols:
                 self.db.execute(
                     f"ALTER TABLE sessions ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+        # 舊 DB 的 user_forums 是 user_key 單一主鍵; 改成 (user_key, category_id) 複合鍵。
+        # 不能靠 ALTER 改主鍵, 重建表; 既有列一律標 category_id=0 (家用/預設分類)。
+        uf = {r["name"] for r in self.db.execute("PRAGMA table_info(user_forums)").fetchall()}
+        if "category_id" not in uf:
+            self.db.executescript(
+                "ALTER TABLE user_forums RENAME TO user_forums_legacy;"
+                "CREATE TABLE user_forums ("
+                "  user_key TEXT NOT NULL, category_id INTEGER NOT NULL DEFAULT 0,"
+                "  forum_id INTEGER NOT NULL, PRIMARY KEY (user_key, category_id));"
+                "INSERT INTO user_forums(user_key, category_id, forum_id) "
+                "  SELECT user_key, 0, forum_id FROM user_forums_legacy;"
+                "DROP TABLE user_forums_legacy;"
+            )
 
-    def get_forum(self, user_key: str) -> Optional[int]:
+    def get_forum(self, user_key: str, category_id: int = 0) -> Optional[int]:
+        """category_id=0 = 家用/預設分類的 forum; 其餘 = 路由到的分類。"""
         row = self.db.execute(
-            "SELECT forum_id FROM user_forums WHERE user_key = ?", (user_key,)
+            "SELECT forum_id FROM user_forums WHERE user_key = ? AND category_id = ?",
+            (user_key, int(category_id)),
         ).fetchone()
         return int(row["forum_id"]) if row else None
 
-    def set_forum(self, user_key: str, forum_id: int) -> None:
+    def set_forum(self, user_key: str, forum_id: int, category_id: int = 0) -> None:
         self.db.execute(
-            "INSERT INTO user_forums(user_key, forum_id) VALUES(?, ?) "
-            "ON CONFLICT(user_key) DO UPDATE SET forum_id = excluded.forum_id",
-            (user_key, forum_id),
+            "INSERT INTO user_forums(user_key, category_id, forum_id) VALUES(?, ?, ?) "
+            "ON CONFLICT(user_key, category_id) DO UPDATE SET forum_id = excluded.forum_id",
+            (user_key, int(category_id), forum_id),
         )
         self.db.commit()
 
@@ -100,7 +117,8 @@ class Store:
         where = [f"s.{_NOT_SENTINEL}"]
         params: list = []
         if user_key is not None:
-            where.append("s.forum_id = (SELECT forum_id FROM user_forums WHERE user_key = ?)")
+            # 一個使用者現在可能有多個 forum (每個路由分類一個), 用 IN 涵蓋全部
+            where.append("s.forum_id IN (SELECT forum_id FROM user_forums WHERE user_key = ?)")
             params.append(user_key)
         if prefix is not None:
             where.append("s.session_id LIKE ? ESCAPE '\\'")

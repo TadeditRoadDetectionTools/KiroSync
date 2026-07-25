@@ -309,6 +309,23 @@ python run.py sessions      # 列出本機 session (直接讀 session 目錄)
 `SNAP_MIN_INTERVAL`(兩次上傳最小間隔)、`SNAP_MAX_WAIT`(持續變動時最遲上傳間隔)。
 要不要渲染工具呼叫改由 **bot 端**的 `INCLUDE_TOOLS` 決定(因為渲染在 bot 做)。
 
+### 依資料夾分流到不同分類(選用)
+
+預設每位使用者的所有 session 都進自己的一個 forum。若想把**某資料夾底下**的 session
+送到指定的 **Discord 分類(Category)**(例如依專案分),可用 `route` 指令設定:
+
+```bash
+python run.py route add "D:\Work\ProjectA" 1529383717565370479 --label ProjectA
+python run.py route list
+python run.py route remove "D:\Work\ProjectA"
+```
+
+- **分類用 ID**(不是名稱):在 Discord 開開發者模式右鍵分類→複製 ID,或到 command 頻道打 **`/categories`** 一次看全部分類的 ID。跟 `.env` 的 `CATEGORY_ID` 同一種東西。
+- **含子資料夾**:在該資料夾**底下**開的 session 都算(不分大小寫、斜線方向);巢狀時最長前綴優先。
+- **路由到的分類下,每位使用者仍各有自己的 forum**(第一次有訊息時才建)。
+- 對應存本機 `client/routes.json`(已 gitignore);沒對應到、或分類找不到 → **fallback 回個人 forum**,不會漏同步。
+- 分類**要先在 Discord 建好**,client 只引用;bot 不會自動建分類。
+
 ---
 
 ## 快速上手(單機自用)
