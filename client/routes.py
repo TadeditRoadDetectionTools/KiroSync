@@ -64,13 +64,13 @@ def remove_route(folder: str, path=None) -> bool:
     return len(kept) != len(routes)
 
 
-def category_for(cwd: str, routes: list) -> Optional[str]:
-    """cwd 落在哪條路由資料夾內 (含子資料夾) -> 該路由的 category_id。
-    最長前綴優先 (巢狀時內層贏); 無命中回 None (bot 端 fallback 個人 forum)。"""
+def route_for(cwd: str, routes: list) -> Optional[dict]:
+    """cwd 命中哪一條路由 (含子資料夾), 回整條 —— 呼叫端才講得出「繼承自哪個資料夾」。
+    最長前綴優先 (巢狀時內層贏); 無命中回 None。"""
     c = norm_path(cwd)
     if not c:
         return None
-    best_id: Optional[str] = None
+    best: Optional[dict] = None
     best_len = -1
     for r in routes:
         f = norm_path(r.get("folder", ""))
@@ -79,5 +79,12 @@ def category_for(cwd: str, routes: list) -> Optional[str]:
             continue
         if (c == f or c.startswith(f + os.sep)) and len(f) > best_len:
             best_len = len(f)
-            best_id = cid
-    return best_id
+            best = r
+    return best
+
+
+def category_for(cwd: str, routes: list) -> Optional[str]:
+    """cwd 落在哪條路由資料夾內 (含子資料夾) -> 該路由的 category_id。
+    無命中回 None (bot 端 fallback 個人 forum)。"""
+    r = route_for(cwd, routes)
+    return str(r.get("category_id")).strip() if r else None

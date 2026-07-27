@@ -68,6 +68,34 @@ class TestPromptCategory(unittest.TestCase):
         self.assertIsNone(cat)
 
 
+class TestCurrentCatLine(unittest.TestCase):
+    """啟動時先讓使用者看到『這個資料夾現在會送去哪』, 再問要不要改。"""
+
+    def test_default_when_no_route(self):
+        self.assertIn("預設", run._current_cat_line(r"D:\Work\A", []))
+
+    def test_exact_route_shows_id(self):
+        rl = [{"folder": r"D:\Work\A", "category_id": "111", "label": ""}]
+        line = run._current_cat_line(r"D:\Work\A", rl)
+        self.assertIn("111", line)
+        self.assertNotIn("繼承", line)  # 就是這個資料夾自己設的, 不該說繼承
+
+    def test_inherited_route_names_source_folder(self):
+        rl = [{"folder": r"D:\Work", "category_id": "111", "label": "團隊"}]
+        line = run._current_cat_line(r"D:\Work\A\sub", rl)
+        self.assertIn("111", line)
+        self.assertIn("團隊", line)
+        self.assertIn(r"D:\Work", line)   # 講清楚是從哪一層繼承來的
+        self.assertIn("繼承", line)
+
+    def test_nested_route_wins(self):
+        rl = [{"folder": r"D:\Work", "category_id": "111", "label": ""},
+              {"folder": r"D:\Work\A", "category_id": "222", "label": ""}]
+        line = run._current_cat_line(r"D:\Work\A", rl)
+        self.assertIn("222", line)
+        self.assertNotIn("111", line)
+
+
 class TestEnsureEnvInteractive(unittest.TestCase):
     """.env 有空值時當場問使用者並寫回; 非互動環境則明確報錯不卡住。"""
 

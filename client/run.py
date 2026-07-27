@@ -331,17 +331,32 @@ def _decide_cat(raw: str, existing: Optional[str]) -> tuple[str, Optional[str]]:
     return "set", raw
 
 
+def _current_cat_line(cwd: str, route_list: list) -> str:
+    """『目前分類』那行的文字。命中的是上層資料夾時要講清楚是繼承來的,
+    否則使用者會以為自己在這個資料夾設定過。"""
+    hit = routes_mod.route_for(cwd, route_list)
+    if not hit:
+        return "  目前分類: 預設(個人 forum)"
+    line = f"  目前分類: {hit.get('category_id')}"
+    if hit.get("label"):
+        line += f"（{hit['label']}）"
+    if routes_mod.norm_path(hit.get("folder", "")) != routes_mod.norm_path(cwd):
+        line += f"  ← 繼承自 {hit.get('folder')}"
+    return line
+
+
 def _prompt_category(cwd: str, route_list: list) -> Optional[str]:
     """互動詢問這個資料夾要上傳到哪個分類; 需要時更新 routes.json。回最終 category_id。"""
     existing = routes_mod.category_for(cwd, route_list)
     print(f"[ks-kiro] 目前資料夾: {cwd}")
+    print(_current_cat_line(cwd, route_list))
+    known = sorted({str(r.get("category_id")) for r in route_list
+                    if r.get("category_id") and str(r.get("category_id")) != existing})
+    if known:
+        print("  已設定過的分類 ID: " + ", ".join(known))
     if existing:
-        prompt = (f"  這個資料夾目前上傳到分類 {existing}。\n"
-                  "  Enter 沿用 / 輸入新的分類 ID / 輸入 '-' 改用預設(個人 forum): ")
+        prompt = ("  Enter 沿用 / 輸入新的分類 ID / 輸入 '-' 改用預設(個人 forum): ")
     else:
-        known = sorted({r.get("category_id") for r in route_list if r.get("category_id")})
-        if known:
-            print("  已設定過的分類 ID: " + ", ".join(known))
         prompt = ("  要上傳到哪個分類? 輸入 Discord 分類 ID "
                   "(在 Discord 打 /categories 可查), 或直接 Enter 用預設: ")
     try:
