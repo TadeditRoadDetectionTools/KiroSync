@@ -23,7 +23,6 @@ import argparse
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -416,6 +415,37 @@ def ensure_env_interactive(keys=None) -> None:
             sys.exit(f"{key} 未設定, 中止。可手動編輯 {env_file} 後再跑一次。")
 
 
+def ensure_kiro_interactive() -> str:
+    """找出 Kiro CLI 執行檔; 找不到就當場問使用者並把路徑寫進 .env 的 KIRO_CMD。
+
+    已經在 PATH 上 (或 KIRO_CMD 已指對) 就直接用, 不打擾使用者 —— 只有真的找不到才問。"""
+    import check
+    cmd = (_e("KIRO_CMD") or "").strip()
+    exe = check.resolve_kiro(cmd or "kiro")
+    if exe:
+        return exe
+
+    where = f"KIRO_CMD={cmd!r} 指不到執行檔" if cmd else "PATH 上找不到 kiro 指令"
+    if not sys.stdin.isatty():
+        sys.exit(f"{where} —— 請在 client/.env 設定 KIRO_CMD 為 Kiro CLI 執行檔的完整路徑")
+
+    print(f"\n[ks] {where}。\n"
+          "  請貼上 Kiro CLI 執行檔的完整路徑 (或它所在的資料夾)\n"
+          "  Windows 例: C:\\Users\\你\\AppData\\Local\\Programs\\kiro\\kiro.exe")
+    for attempt in range(3):
+        try:
+            raw = input("  KIRO_CMD = ").strip()
+        except EOFError:
+            sys.exit(f"\n沒有輸入可讀, 中止。請手動在 {HERE / '.env'} 填好 KIRO_CMD。")
+        exe = check.resolve_kiro(raw)
+        if exe:
+            envcfg_set("KIRO_CMD", exe)  # 存解析後的路徑, 下次直接用
+            print(f"  已寫入 KIRO_CMD = {exe}")
+            return exe
+        print("  這個路徑上找不到執行檔, 再試一次。" if attempt < 2 else "  仍然找不到。")
+    sys.exit(f"KIRO_CMD 未設定, 中止。可手動編輯 {HERE / '.env'} 後再跑一次。")
+
+
 def envcfg_set(key: str, value: str) -> None:
     """寫回 .env, 同時更新本行程的環境 (讓 _e / 背景 sync 子行程立刻讀得到)。"""
     import envcfg
@@ -434,6 +464,7 @@ def cmd_kiro(args) -> None:
     """全域啟動器: 先問這個資料夾要上傳到哪個分類, 背景啟動 sync, 再前景啟動 Kiro CLI;
     Kiro 結束後等最後一次同步 flush 再停 sync。目的: 讓使用者不會忘了開同步。"""
     ensure_env_interactive()  # .env 有空值就當場問使用者並寫回
+    exe = ensure_kiro_interactive()  # 先確定 kiro 找得到, 免得設完路由才發現不能啟動
     user = user_name()
     cwd = str(Path.cwd())
 
@@ -446,12 +477,6 @@ def cmd_kiro(args) -> None:
         cat = value
     else:
         cat = _prompt_category(cwd, routes_mod.load_routes())
-
-    kiro_cmd = _e("KIRO_CMD") or "kiro"
-    exe = shutil.which(kiro_cmd)
-    if exe is None:
-        sys.exit(f"找不到 Kiro CLI 執行檔 '{kiro_cmd}' (不在 PATH 上)。"
-                 "裝好 Kiro CLI, 或用環境變數 KIRO_CMD 指定執行檔名/路徑。")
 
     # 背景啟動 sync (log 導到檔, 免得洗掉 Kiro 的互動畫面)
     log_path = HERE / "ks-sync.log"
@@ -470,7 +495,7 @@ def cmd_kiro(args) -> None:
     kiro_args = list(args.kiro_args or [])
     if kiro_args and kiro_args[0] == "--":  # argparse REMAINDER 會保留分隔的 '--', 去掉
         kiro_args = kiro_args[1:]
-    print(f"[ks-kiro] 啟動 Kiro CLI ({kiro_cmd}) …\n")
+    print(f"[ks-kiro] 啟動 Kiro CLI ({exe}) …\n")
     try:
         subprocess.run([exe] + kiro_args)
     except KeyboardInterrupt:

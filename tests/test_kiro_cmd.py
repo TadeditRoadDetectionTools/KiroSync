@@ -134,5 +134,116 @@ class TestEnsureEnvInteractive(unittest.TestCase):
                 run.ensure_env_interactive()
 
 
+class TestResolveKiro(unittest.TestCase):
+    """KIRO_CMD 解析: PATH 指令名 / 完整路徑 / 資料夾 / 引號, 都要對得上。"""
+
+    def setUp(self):
+        import check
+        self.check = check
+        self.td = tempfile.TemporaryDirectory()
+        self.dir = __import__("pathlib").Path(self.td.name)
+        self.exe = self.dir / ("kiro.exe" if os.name == "nt" else "kiro")
+        self.exe.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_blank_is_none(self):
+        self.assertIsNone(self.check.resolve_kiro(""))
+        self.assertIsNone(self.check.resolve_kiro(None))
+
+    def test_full_path(self):
+        self.assertEqual(self.check.resolve_kiro(str(self.exe)), str(self.exe))
+
+    def test_directory_finds_exe_inside(self):
+        # 使用者常直接貼安裝資料夾而不是執行檔
+        self.assertEqual(self.check.resolve_kiro(str(self.dir)), str(self.exe))
+
+    def test_quotes_stripped(self):
+        self.assertEqual(self.check.resolve_kiro(f'"{self.exe}"'), str(self.exe))
+
+    def test_missing_path_is_none(self):
+        self.assertIsNone(self.check.resolve_kiro(str(self.dir / "nope" / "kiro.exe")))
+
+    def test_directory_without_exe_is_none(self):
+        with tempfile.TemporaryDirectory() as empty:
+            self.assertIsNone(self.check.resolve_kiro(empty))
+
+    def test_path_lookup_used(self):
+        with mock.patch("shutil.which", return_value="/usr/bin/kiro"):
+            self.assertEqual(self.check.resolve_kiro("kiro"), "/usr/bin/kiro")
+
+
+class TestEnsureKiroInteractive(unittest.TestCase):
+    """找得到就不打擾; 找不到才問, 並把解析後的路徑寫回 .env。"""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.here = __import__("pathlib").Path(self.td.name)
+        self.exe = self.here / ("kiro.exe" if os.name == "nt" else "kiro")
+        self.exe.write_text("#!/bin/sh\n", encoding="utf-8")
+        self._p = mock.patch.object(run, "HERE", self.here)
+        self._p.start()
+        self._env = mock.patch.dict(run.ENV, {}, clear=True)
+        self._env.start()
+        self._os = mock.patch.dict(
+            os.environ, {k: v for k, v in os.environ.items() if k != "KIRO_CMD"},
+            clear=True)
+        self._os.start()
+        # 預設當作 PATH 上沒有 kiro, 個別測試再覆寫
+        self._which = mock.patch("shutil.which", return_value=None)
+        self._which.start()
+
+    def tearDown(self):
+        self._which.stop()
+        self._os.stop()
+        self._env.stop()
+        self._p.stop()
+        self.td.cleanup()
+
+    def test_found_on_path_does_not_prompt(self):
+        self._which.stop()
+        with mock.patch("shutil.which", return_value="/usr/bin/kiro"), \
+             mock.patch("builtins.input", side_effect=AssertionError("不該問")):
+            self.assertEqual(run.ensure_kiro_interactive(), "/usr/bin/kiro")
+
+    def test_env_value_already_valid_does_not_prompt(self):
+        run.ENV["KIRO_CMD"] = str(self.exe)
+        with mock.patch("builtins.input", side_effect=AssertionError("不該問")):
+            self.assertEqual(run.ensure_kiro_interactive(), str(self.exe))
+
+    def test_non_interactive_exits_instead_of_hanging(self):
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=False):
+            with self.assertRaises(SystemExit):
+                run.ensure_kiro_interactive()
+
+    def test_prompts_and_writes_env(self):
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", side_effect=[str(self.exe)]):
+            self.assertEqual(run.ensure_kiro_interactive(), str(self.exe))
+        written = (self.here / ".env").read_text(encoding="utf-8")
+        self.assertIn(f"KIRO_CMD={self.exe}", written)
+        self.assertEqual(run._e("KIRO_CMD"), str(self.exe))  # 同一行程立刻生效
+
+    def test_bad_path_then_good(self):
+        bad = str(self.here / "沒有這個")
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", side_effect=[bad, str(self.exe)]):
+            self.assertEqual(run.ensure_kiro_interactive(), str(self.exe))
+
+    def test_gives_up_after_three_tries(self):
+        bad = str(self.here / "沒有這個")
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", side_effect=[bad, bad, bad]):
+            with self.assertRaises(SystemExit):
+                run.ensure_kiro_interactive()
+
+    def test_eof_exits_immediately(self):
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", side_effect=EOFError):
+            with self.assertRaises(SystemExit):
+                run.ensure_kiro_interactive()
+
+
 if __name__ == "__main__":
     unittest.main()

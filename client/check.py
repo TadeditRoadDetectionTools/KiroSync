@@ -10,7 +10,8 @@ KiroSync Client 設定自檢。
 檢查項目:
   1. WEBHOOK_URL  有沒有填、格式對不對、(預設) 實際 GET 一次確認可用並顯示連到哪個頻道
   2. USER_NAME    有沒有填 (空的話 bot 會用系統帳號分流, 顯示實際會用的值)
-  3. Kiro session 目錄  存不存在、有沒有 session 可同步
+  3. KIRO_CMD     Kiro CLI 執行檔找不找得到 (PATH 上或 .env 指定的路徑)
+  4. Kiro session 目錄  存不存在、有沒有 session 可同步
 
 回傳碼: 有任何 FAIL -> 1, 否則 0 (方便接在啟動腳本前面把關)。
 """
@@ -19,7 +20,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
 import sys
 import urllib.error
 import urllib.request
@@ -96,6 +99,45 @@ def check_user_name(raw: str | None) -> None:
           "(多台機器要填一樣的, 否則會拆成多個 forum)")
 
 
+KIRO_EXE_NAMES = ("kiro.exe", "kiro.cmd", "kiro.bat", "kiro")
+
+
+def resolve_kiro(cmd: str | None) -> str | None:
+    """把 KIRO_CMD 解析成實際可執行檔的路徑; 解析不到回 None。
+
+    接受三種寫法: PATH 上的指令名 (預設 'kiro')、執行檔完整路徑、含 kiro 執行檔的
+    資料夾 (使用者常直接貼安裝目錄)。引號與 ~/%VAR% 都先展開。
+    ks-kiro 與 check 共用這一份, 免得「檢查說找得到但啟動時找不到」。"""
+    cmd = (cmd or "").strip().strip("\"'“”＂「」")
+    if not cmd:
+        return None
+    found = shutil.which(cmd)
+    if found:
+        return found
+    p = Path(os.path.expandvars(os.path.expanduser(cmd)))
+    if p.is_dir():
+        for name in KIRO_EXE_NAMES:
+            if (p / name).is_file():
+                return str(p / name)
+        return None
+    return str(p) if p.is_file() else None
+
+
+def check_kiro_cmd(raw: str | None) -> None:
+    cmd = (raw or "").strip()
+    exe = resolve_kiro(cmd or "kiro")
+    if exe:
+        _mark("ok", "Kiro CLI 執行檔找得到", exe)
+        return
+    if cmd:  # 明確填了卻解析不到 = 設定錯誤
+        _mark("fail", "KIRO_CMD 指向的執行檔不存在",
+              f"{cmd}  (填 kiro 執行檔的完整路徑, 或它所在的資料夾)")
+    else:
+        # 沒填且 PATH 上也沒有: sync/export 照樣能跑, 只有 ks-kiro 需要, 它會當場問
+        _mark("warn", "PATH 上找不到 kiro 指令",
+              "sync/export 不受影響; 跑 ks-kiro 時會請你指定路徑並寫進 .env 的 KIRO_CMD")
+
+
 def check_kiro_dir(watch_dir: str | None) -> None:
     wd = Path(watch_dir) if watch_dir else Path.home() / ".kiro" / "sessions" / "cli"
     if not wd.exists():
@@ -132,6 +174,7 @@ def run(argv=None) -> int:
 
     check_webhook(get(env, "WEBHOOK_URL"), use_net=not args.no_net)
     check_user_name(get(env, "USER_NAME"))
+    check_kiro_cmd(get(env, "KIRO_CMD"))
     check_kiro_dir(get(env, "WATCH_DIR"))
     check_routes()
 

@@ -308,7 +308,9 @@ ks route list
 
 - **`.env` 沒填也能開始**:第一次跑 `ks-kiro` 時,若 `WEBHOOK_URL` / `USER_NAME` 是空的,
   它會**當場問你**並寫回 `client/.env`(貼上時連引號一起貼也會自動處理)。
-- Kiro 執行檔名預設 `kiro`;不同就設環境變數 `KIRO_CMD`(例如 `KIRO_CMD=kiro-cli`)。
+- **找不到 Kiro 執行檔也會當場問**:預設用 PATH 上的 `kiro`;沒有的話 `ks-kiro` 會請你貼上
+  執行檔完整路徑(或**它所在的資料夾**),解析後寫進 `.env` 的 `KIRO_CMD`,之後不再問。
+  `ks check` 也會檢查這一項。
 - 背景同步的輸出寫到 `client/ks-sync.log`(不洗掉 Kiro 的互動畫面);要看同步狀況去翻它。
 - 若把專案資料夾搬走,重跑一次 `pip install -e <新路徑>/client` 即可。
 
