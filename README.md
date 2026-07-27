@@ -286,19 +286,31 @@ python run.py kiro          # 全域啟動器: 問上傳分類 -> 背景同步 -
 (直接 Enter = 預設個人 forum),**在背景啟動同步**,再**前景啟動 Kiro CLI**;你結束 Kiro 後
 它會等最後一次同步送完才停背景同步。這樣「開 Kiro」與「同步」永遠綁在一起,不會漏。
 
-**設成全域指令**(一次性):把 `client` 這個資料夾加進 `PATH`,之後在任何專案資料夾:
+**安裝成全域指令**(一次性,用 pip 本地安裝):
+
+```bash
+pip install -e ./client
+```
+
+`-e`(editable)讓程式就地執行 —— `.env`、`routes.json` 仍留在 `client/`,`git pull` 更新後
+**不用重裝**。裝完會多兩個指令:`ks-kiro`(啟動器)和 `ks`(完整 CLI,等同 `python run.py …`)。
+之後在任何專案資料夾:
 
 ```bash
 cd D:\Work\ProjectA
 ks-kiro                     # 問分類 -> 背景同步 -> 啟動 Kiro
 ks-kiro --cat 1529383717565370479   # 跳過詢問, 直接指定分類 ID ('-' = 用預設)
 ks-kiro -- --agent xxx      # '--' 之後的參數原樣轉給 Kiro CLI
+
+ks check                    # 其他子指令一樣可用
+ks route list
 ```
 
-- Windows 用 `client\ks-kiro.cmd`、macOS/Linux 用 `client/ks-kiro`(兩支都會自動定位 `run.py`)。
+- **`.env` 沒填也能開始**:第一次跑 `ks-kiro` 時,若 `WEBHOOK_URL` / `USER_NAME` 是空的,
+  它會**當場問你**並寫回 `client/.env`(貼上時連引號一起貼也會自動處理)。
 - Kiro 執行檔名預設 `kiro`;不同就設環境變數 `KIRO_CMD`(例如 `KIRO_CMD=kiro-cli`)。
 - 背景同步的輸出寫到 `client/ks-sync.log`(不洗掉 Kiro 的互動畫面);要看同步狀況去翻它。
-- 需要先設好 `.env`(`WEBHOOK_URL` / `USER_NAME`)—— 缺就會先擋下來提醒。
+- 若把專案資料夾搬走,重跑一次 `pip install -e <新路徑>/client` 即可。
 
 **`WEBHOOK_URL` 從哪來?** bot 上線後,到 Discord 的 `kiro-command` 頻道看**釘選訊息**,
 或在任何頻道打 **`/webhook`**,把那條 URL 複製進 client 的 `.env`。
@@ -356,14 +368,17 @@ python run.py route remove "D:\Work\ProjectA"
    - 直接跑:`cd bot && pip install -r requirements.txt && cp .env.example .env`,填好後 `python run.py`
 2. 確認上線:`docker compose logs -f bot`(或看終端機)出現 `[bot] 已登入: <名字>`。
 3. bot 上線後,`kiro-command` 頻道會有釘選的 webhook URL(或打 `/webhook`)。
-4. `cd client && cp .env.example .env`,填 `WEBHOOK_URL`/`USER_NAME`,`python run.py sync`。
-5. 開一場 Kiro 對話 → `kiro-<USER_NAME>` 論壇會自動長出對應 thread。
+4. 裝 client:`pip install -e ./client`(裝好 `ks-kiro` / `ks` 指令)。
+5. 到你的專案資料夾打 **`ks-kiro`** —— 第一次會問 webhook URL、識別名與上傳分類,
+   填完就自動開始同步並啟動 Kiro CLI。
+6. 開始對話 → `kiro-<USER_NAME>` 論壇會自動長出對應 thread。
 
-> 第 4 步之前要先 `kiro-cli login` 並開過至少一場對話,不然本機根本沒有 session 檔可同步。
+> 第 5 步之前要先 `kiro-cli login`,不然 Kiro CLI 起不來、也沒有 session 檔可同步。
+> 不想裝也行:`cd client && cp .env.example .env` 填好後 `python run.py sync`。
 
 ## 多人擴充
-其他人不需要自己的 bot、也不用跟你的機器連線 —— 只要拿到那條 webhook URL,把
-`WEBHOOK_URL` / `USER_NAME` 填進自己 `client/.env` 跑 `python run.py sync` 即可。
+其他人不需要自己的 bot、也不用跟你的機器連線 —— 只要拿到那條 webhook URL,
+`pip install -e ./client` 後跑 `ks-kiro`(第一次會問 webhook 與識別名)即可。
 Bot 靠 payload 裡的 `USER_NAME` 分流到各自的 forum。
 
 > **信任模型:guild 成員彼此互信。** webhook URL 釘選在人人可見的 `kiro-command`

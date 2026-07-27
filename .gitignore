@@ -13,6 +13,8 @@ client/ks-sync.log
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
+build/
 
 # 舊的扁平版殘留 (已改成 bot/ + client/)
 /ks.db

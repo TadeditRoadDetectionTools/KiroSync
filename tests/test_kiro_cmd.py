@@ -68,5 +68,71 @@ class TestPromptCategory(unittest.TestCase):
         self.assertIsNone(cat)
 
 
+class TestEnsureEnvInteractive(unittest.TestCase):
+    """.env 有空值時當場問使用者並寫回; 非互動環境則明確報錯不卡住。"""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.here = __import__("pathlib").Path(self.td.name)
+        self._p = mock.patch.object(run, "HERE", self.here)
+        self._p.start()
+        # 讓 _e() 只看得到我們給的 ENV, 且環境變數不干擾
+        self._env = mock.patch.dict(run.ENV, {}, clear=True)
+        self._env.start()
+        self._os = mock.patch.dict(
+            os.environ, {k: v for k, v in os.environ.items()
+                         if k not in ("WEBHOOK_URL", "USER_NAME")}, clear=True)
+        self._os.start()
+
+    def tearDown(self):
+        self._os.stop()
+        self._env.stop()
+        self._p.stop()
+        self.td.cleanup()
+
+    def test_noop_when_all_present(self):
+        run.ENV.update({"WEBHOOK_URL": "https://discord.com/api/webhooks/1/a",
+                        "USER_NAME": "alice"})
+        with mock.patch("builtins.input", side_effect=AssertionError("不該問")):
+            run.ensure_env_interactive()
+
+    def test_non_interactive_exits_instead_of_hanging(self):
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=False):
+            with self.assertRaises(SystemExit):
+                run.ensure_env_interactive()
+
+    def test_prompts_and_writes_env(self):
+        url = "https://discord.com/api/webhooks/1529410298883211425/abcDEF-123"
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", side_effect=[url, "alice"]):
+            run.ensure_env_interactive()
+        written = (self.here / ".env").read_text(encoding="utf-8")
+        self.assertIn(f"WEBHOOK_URL={url}", written)
+        self.assertIn("USER_NAME=alice", written)
+        # 同一行程立刻讀得到 (背景 sync 子行程也才拿得到)
+        self.assertEqual(run._e("WEBHOOK_URL"), url)
+        self.assertEqual(run.user_name(), "alice")
+
+    def test_rejects_bad_webhook_then_accepts(self):
+        url = "https://discord.com/api/webhooks/1529410298883211425/abcDEF-123"
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", side_effect=["不是網址", url, "alice"]):
+            run.ensure_env_interactive()
+        self.assertEqual(run._e("WEBHOOK_URL"), url)
+
+    def test_strips_quotes_user_pasted(self):
+        url = "https://discord.com/api/webhooks/1529410298883211425/abcDEF-123"
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", side_effect=[f'"{url}"', "alice"]):
+            run.ensure_env_interactive()
+        self.assertEqual(run._e("WEBHOOK_URL"), url)  # 引號要被剝掉
+
+    def test_eof_exits_immediately(self):
+        with mock.patch.object(run.sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", side_effect=EOFError):
+            with self.assertRaises(SystemExit):
+                run.ensure_env_interactive()
+
+
 if __name__ == "__main__":
     unittest.main()

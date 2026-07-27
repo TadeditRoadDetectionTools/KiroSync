@@ -363,6 +363,67 @@ def _prompt_category(cwd: str, route_list: list) -> Optional[str]:
     return value
 
 
+def _valid_webhook(v: str) -> bool:
+    import check  # 沿用自檢那份格式規則, 避免兩套標準
+    return bool(check.WEBHOOK_RE.match(v))
+
+
+# (鍵, 提示, 說明, 驗證函式) — ks-kiro 啟動前若空值就照這個順序問
+ENV_PROMPTS = [
+    ("WEBHOOK_URL", "Discord Webhook URL",
+     "到 Discord 的 kiro-command 頻道看釘選訊息, 或在任一頻道打 /webhook 取得",
+     _valid_webhook),
+    ("USER_NAME", "你的識別名",
+     "bot 用它把對話分流到你專屬的 forum; 多台機器要填一樣的",
+     lambda v: bool(v.strip())),
+]
+
+
+def ensure_env_interactive(keys=None) -> None:
+    """.env 缺必填值時當場問使用者並寫回 .env。
+
+    非互動環境 (例如背景啟動的 sync) 不問, 直接以錯誤結束 —— 免得在看不到的地方
+    卡在 input() 等輸入。"""
+    wanted = [e for e in ENV_PROMPTS if keys is None or e[0] in keys]
+    missing = [e for e in wanted if not (_e(e[0]) or "").strip()]
+    if not missing:
+        return
+    names = ", ".join(e[0] for e in missing)
+    if not sys.stdin.isatty():
+        sys.exit(f"client/.env 缺 {names} —— 請先填好 (或跑 `ks check` 檢查)")
+
+    env_file = HERE / ".env"
+    if not env_file.exists():  # 沒有 .env 就先從範本複製一份 (保留註解說明)
+        example = HERE / ".env.example"
+        if example.exists():
+            env_file.write_bytes(example.read_bytes())
+    print(f"[ks] 首次設定: {names} 還沒填, 現在補上 (會寫進 {env_file})")
+
+    for key, label, hint, valid in missing:
+        print(f"\n  {label}\n  {hint}")
+        for attempt in range(3):
+            try:
+                val = input(f"  {key} = ").strip()
+            except EOFError:  # 讀不到輸入 (被導向/isatty 判斷不準) — 別空轉三次
+                sys.exit(f"\n沒有輸入可讀, 中止。請手動編輯 {env_file} 填好 {key}。")
+            val = val.strip("\"'“”＂「」")  # 使用者常連引號一起貼
+            if valid(val):
+                envcfg_set(key, val)
+                print(f"  已寫入 {key}")
+                break
+            print("  格式看起來不對, 再試一次。" if attempt < 2 else "  仍然無效。")
+        else:
+            sys.exit(f"{key} 未設定, 中止。可手動編輯 {env_file} 後再跑一次。")
+
+
+def envcfg_set(key: str, value: str) -> None:
+    """寫回 .env, 同時更新本行程的環境 (讓 _e / 背景 sync 子行程立刻讀得到)。"""
+    import envcfg
+    envcfg.set_env_value(key, value, str(HERE / ".env"))
+    ENV[key] = value
+    os.environ[key] = value
+
+
 def _sync_grace_seconds() -> float:
     """kiro 結束後等多久再停背景 sync, 讓最後一次快照有機會 flush。"""
     _, debounce, min_interval, _ = _snap_params()
@@ -372,9 +433,8 @@ def _sync_grace_seconds() -> float:
 def cmd_kiro(args) -> None:
     """全域啟動器: 先問這個資料夾要上傳到哪個分類, 背景啟動 sync, 再前景啟動 Kiro CLI;
     Kiro 結束後等最後一次同步 flush 再停 sync。目的: 讓使用者不會忘了開同步。"""
-    if not _e("WEBHOOK_URL"):
-        sys.exit(".env 缺 WEBHOOK_URL — 先設定好 client/.env 再用 ks-kiro")
-    user = user_name()  # 缺 USER_NAME 會在這裡自己 sys.exit
+    ensure_env_interactive()  # .env 有空值就當場問使用者並寫回
+    user = user_name()
     cwd = str(Path.cwd())
 
     if args.cat is not None:  # --cat 跳過詢問

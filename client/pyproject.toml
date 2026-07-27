@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kirosync-client"
+version = "1.0.0"
+description = "KiroSync client — 把 Kiro CLI 對話同步到 Discord"
+requires-python = ">=3.9"
+dependencies = []          # 零依賴: 純標準庫
+
+[project.scripts]
+ks-kiro = "ks_kiro.cli:kiro_main"   # 問分類 -> 背景同步 -> 啟動 Kiro CLI
+ks = "ks_kiro.cli:main"             # 完整 CLI: ks sync / ks check / ks route ...
+
+# 只裝一個 ks_kiro 套件 (薄殼)。實際邏輯仍是 client/ 下的扁平模組 (run/uplink/routes...),
+# 用 editable 安裝 (pip install -e) 就地執行 —— 這樣 .env 與 routes.json 仍留在 client/,
+# 也不會把 run/check 這種通用名稱灌進全域 import 空間。
+[tool.setuptools]
+packages = ["ks_kiro"]

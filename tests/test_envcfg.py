@@ -61,6 +61,57 @@ class TestLoadEnv(unittest.TestCase):
         self.assertEqual(envcfg.load_env("/nonexistent/.env"), {})
 
 
+class TestSetEnvValue(unittest.TestCase):
+    """寫回 .env: 就地更新既有行、保留註解、缺就補、Big5 舊檔正規化成 UTF-8。"""
+
+    def _write(self, td, text, encoding="utf-8"):
+        p = Path(td) / ".env"
+        p.write_bytes(text.encode(encoding))
+        return p
+
+    def test_updates_existing_key_in_place(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "# 註解\nWEBHOOK_URL=\nUSER_NAME=bob\n")
+            envcfg.set_env_value("WEBHOOK_URL", "https://x/y", str(p))
+            out = p.read_text(encoding="utf-8")
+            self.assertIn("WEBHOOK_URL=https://x/y", out)
+            self.assertIn("# 註解", out)          # 註解保留
+            self.assertIn("USER_NAME=bob", out)   # 其他設定不動
+            self.assertEqual(envcfg.load_env(str(p))["WEBHOOK_URL"], "https://x/y")
+
+    def test_appends_when_key_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "USER_NAME=bob\n")
+            envcfg.set_env_value("WEBHOOK_URL", "https://x/y", str(p))
+            data = envcfg.load_env(str(p))
+            self.assertEqual(data["WEBHOOK_URL"], "https://x/y")
+            self.assertEqual(data["USER_NAME"], "bob")
+
+    def test_creates_file_when_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / ".env"
+            envcfg.set_env_value("USER_NAME", "alice", str(p))
+            self.assertTrue(p.exists())
+            self.assertEqual(envcfg.load_env(str(p))["USER_NAME"], "alice")
+
+    def test_does_not_touch_commented_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "# USER_NAME=範例\n")
+            envcfg.set_env_value("USER_NAME", "alice", str(p))
+            out = p.read_text(encoding="utf-8")
+            self.assertIn("# USER_NAME=範例", out)  # 註解那行不能被當成設定改掉
+            self.assertEqual(envcfg.load_env(str(p))["USER_NAME"], "alice")
+
+    def test_big5_file_survives_and_becomes_utf8(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "SYNC_WORKSPACES=D:\\IGS\\AI測試\nUSER_NAME=\n", "cp950")
+            envcfg.set_env_value("USER_NAME", "alice", str(p))
+            data = envcfg.load_env(str(p))
+            self.assertEqual(data["USER_NAME"], "alice")
+            self.assertEqual(data["SYNC_WORKSPACES"], "D:\\IGS\\AI測試")  # 中文沒壞
+            p.read_text(encoding="utf-8")  # 已是 UTF-8, 不該丟例外
+
+
 class TestEncodingTolerance(unittest.TestCase):
     """.env 存成非 UTF-8 (中文 Windows Big5/ANSI) 或含 BOM 都不該讓 load_env 崩。"""
 
