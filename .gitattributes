@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# 全域啟動器的 bash 版必須永遠 LF (CRLF 會讓 shebang 變 bad interpreter)
+client/ks-kiro text eol=lf
