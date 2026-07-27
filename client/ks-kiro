@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# KiroSync 全域啟動器 (macOS/Linux): 問上傳分類 -> 背景同步 -> 啟動 Kiro CLI。
+# 把 client 這個資料夾加進 PATH, 或把這支腳本 symlink 到 PATH 上的目錄。
+# 以自身位置定位 run.py (支援透過 symlink 呼叫)。
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+here="$(cd -P "$(dirname "$src")" && pwd)"
+exec python3 "$here/run.py" kiro "$@"

@@ -277,7 +277,28 @@ python run.py sync          # 監看並把 raw 快照 (zip) 切片上傳 (bot �
 python run.py export <sid>  # 一次性把某 session 快照上傳 (供他機搬移)
 python run.py pull <url...> # 搬移: 把 /link 給的連結(多片依序)還原 session 到本機
 python run.py sessions      # 列出本機 session (直接讀 session 目錄)
+python run.py kiro          # 全域啟動器: 問上傳分類 -> 背景同步 -> 啟動 Kiro CLI
 ```
+
+### `ks-kiro` — 一個指令搞定「同步 + 開 Kiro」(推薦)
+
+怕忘了先開 `sync`?用 `ks-kiro` 取代直接打 `kiro`:它會**先問這個資料夾要上傳到哪個分類**
+(直接 Enter = 預設個人 forum),**在背景啟動同步**,再**前景啟動 Kiro CLI**;你結束 Kiro 後
+它會等最後一次同步送完才停背景同步。這樣「開 Kiro」與「同步」永遠綁在一起,不會漏。
+
+**設成全域指令**(一次性):把 `client` 這個資料夾加進 `PATH`,之後在任何專案資料夾:
+
+```bash
+cd D:\Work\ProjectA
+ks-kiro                     # 問分類 -> 背景同步 -> 啟動 Kiro
+ks-kiro --cat 1529383717565370479   # 跳過詢問, 直接指定分類 ID ('-' = 用預設)
+ks-kiro -- --agent xxx      # '--' 之後的參數原樣轉給 Kiro CLI
+```
+
+- Windows 用 `client\ks-kiro.cmd`、macOS/Linux 用 `client/ks-kiro`(兩支都會自動定位 `run.py`)。
+- Kiro 執行檔名預設 `kiro`;不同就設環境變數 `KIRO_CMD`(例如 `KIRO_CMD=kiro-cli`)。
+- 背景同步的輸出寫到 `client/ks-sync.log`(不洗掉 Kiro 的互動畫面);要看同步狀況去翻它。
+- 需要先設好 `.env`(`WEBHOOK_URL` / `USER_NAME`)—— 缺就會先擋下來提醒。
 
 **`WEBHOOK_URL` 從哪來?** bot 上線後,到 Discord 的 `kiro-command` 頻道看**釘選訊息**,
 或在任何頻道打 **`/webhook`**,把那條 URL 複製進 client 的 `.env`。

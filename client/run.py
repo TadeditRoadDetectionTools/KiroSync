@@ -14,6 +14,7 @@ client 因此是**無狀態的** — 不解析、不存 DB, 重啟後靠比對�
     python run.py sessions    # 列出本機 session (直接讀 session 目錄)
     python run.py route add <資料夾> <分類ID>   # 把某資料夾的 session 送到指定 Discord 分類
     python run.py route list / route remove <資料夾>
+    python run.py kiro        # 全域啟動器: 問上傳分類 -> 背景同步 -> 啟動 Kiro CLI (見 ks-kiro)
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ import argparse
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 import zipfile
@@ -315,6 +318,123 @@ def cmd_check(args) -> None:
     raise SystemExit(check.run(["--no-net"] if args.no_net else []))
 
 
+def _decide_cat(raw: str, existing: Optional[str]) -> tuple[str, Optional[str]]:
+    """把使用者對『上傳到哪個分類』的輸入判成動作。純函式, 好測。
+    回 (action, value): keep=沿用現有 / default=改用預設(清除) / set=設成新 id /
+    invalid=非數字(不改, 這次沿用現有)。"""
+    raw = (raw or "").strip()
+    if raw == "":
+        return "keep", existing
+    if raw == "-":
+        return "default", None
+    if not raw.isdigit():
+        return "invalid", existing
+    return "set", raw
+
+
+def _prompt_category(cwd: str, route_list: list) -> Optional[str]:
+    """互動詢問這個資料夾要上傳到哪個分類; 需要時更新 routes.json。回最終 category_id。"""
+    existing = routes_mod.category_for(cwd, route_list)
+    print(f"[ks-kiro] 目前資料夾: {cwd}")
+    if existing:
+        prompt = (f"  這個資料夾目前上傳到分類 {existing}。\n"
+                  "  Enter 沿用 / 輸入新的分類 ID / 輸入 '-' 改用預設(個人 forum): ")
+    else:
+        known = sorted({r.get("category_id") for r in route_list if r.get("category_id")})
+        if known:
+            print("  已設定過的分類 ID: " + ", ".join(known))
+        prompt = ("  要上傳到哪個分類? 輸入 Discord 分類 ID "
+                  "(在 Discord 打 /categories 可查), 或直接 Enter 用預設: ")
+    try:
+        raw = input(prompt)
+    except EOFError:
+        raw = ""
+    action, value = _decide_cat(raw, existing)
+    if action == "set":
+        routes_mod.add_route(cwd, value)
+        print(f"  已設定: 此資料夾 → 分類 {value}")
+    elif action == "default":
+        if routes_mod.remove_route(cwd):
+            print("  已改用預設 (清除此資料夾的路由)。")
+        else:
+            print("  使用預設 (個人 forum)。")
+    elif action == "invalid":
+        print("  不是數字 ID, 未變更路由 (這次沿用現有設定)。")
+    return value
+
+
+def _sync_grace_seconds() -> float:
+    """kiro 結束後等多久再停背景 sync, 讓最後一次快照有機會 flush。"""
+    _, debounce, min_interval, _ = _snap_params()
+    return debounce + min_interval + 3.0
+
+
+def cmd_kiro(args) -> None:
+    """全域啟動器: 先問這個資料夾要上傳到哪個分類, 背景啟動 sync, 再前景啟動 Kiro CLI;
+    Kiro 結束後等最後一次同步 flush 再停 sync。目的: 讓使用者不會忘了開同步。"""
+    if not _e("WEBHOOK_URL"):
+        sys.exit(".env 缺 WEBHOOK_URL — 先設定好 client/.env 再用 ks-kiro")
+    user = user_name()  # 缺 USER_NAME 會在這裡自己 sys.exit
+    cwd = str(Path.cwd())
+
+    if args.cat is not None:  # --cat 跳過詢問
+        action, value = _decide_cat(args.cat, routes_mod.category_for(cwd, routes_mod.load_routes()))
+        if action == "set":
+            routes_mod.add_route(cwd, value)
+        elif action == "default":
+            routes_mod.remove_route(cwd)
+        cat = value
+    else:
+        cat = _prompt_category(cwd, routes_mod.load_routes())
+
+    kiro_cmd = _e("KIRO_CMD") or "kiro"
+    exe = shutil.which(kiro_cmd)
+    if exe is None:
+        sys.exit(f"找不到 Kiro CLI 執行檔 '{kiro_cmd}' (不在 PATH 上)。"
+                 "裝好 Kiro CLI, 或用環境變數 KIRO_CMD 指定執行檔名/路徑。")
+
+    # 背景啟動 sync (log 導到檔, 免得洗掉 Kiro 的互動畫面)
+    log_path = HERE / "ks-sync.log"
+    logf = open(log_path, "a", encoding="utf-8")
+    logf.write(f"\n==== ks-kiro sync @ {time.strftime('%Y-%m-%d %H:%M:%S')} cwd={cwd} ====\n")
+    logf.flush()
+    sync_proc = subprocess.Popen(
+        [sys.executable, str(HERE / "run.py"), "sync"], stdout=logf, stderr=logf)
+    print(f"[ks-kiro] 背景同步已啟動  使用者={user}  分類={cat or '預設(個人 forum)'}  "
+          f"(log: {log_path})")
+    time.sleep(1.5)
+    if sync_proc.poll() is not None:
+        print("[ks-kiro] ⚠ 警告: 背景同步啟動後立刻結束, 請看上面的 log; "
+              "Kiro 仍會啟動, 但對話可能不會上傳。")
+
+    kiro_args = list(args.kiro_args or [])
+    if kiro_args and kiro_args[0] == "--":  # argparse REMAINDER 會保留分隔的 '--', 去掉
+        kiro_args = kiro_args[1:]
+    print(f"[ks-kiro] 啟動 Kiro CLI ({kiro_cmd}) …\n")
+    try:
+        subprocess.run([exe] + kiro_args)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if sync_proc.poll() is None:
+            grace = _sync_grace_seconds()
+            print(f"\n[ks-kiro] Kiro 已結束, 等待最後一次同步 ({grace:.0f}s)…")
+            try:
+                time.sleep(grace)
+            except KeyboardInterrupt:
+                pass
+            sync_proc.terminate()
+            try:
+                sync_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                sync_proc.kill()
+            print("[ks-kiro] 背景同步已停止。")
+        try:
+            logf.close()
+        except Exception:
+            pass
+
+
 def cmd_route_add(args) -> None:
     cid = (args.category_id or "").strip()
     if not cid.isdigit():
@@ -370,6 +490,13 @@ def main(argv=None) -> None:
     pc = sub.add_parser("check", help="自檢 .env (WEBHOOK_URL / USER_NAME 有沒有填好)")
     pc.add_argument("--no-net", action="store_true", help="不連 Discord, 只做本機格式檢查")
     pc.set_defaults(func=cmd_check)
+
+    pk = sub.add_parser("kiro", help="問上傳分類 → 背景啟動同步 → 前景啟動 Kiro CLI (全域啟動器)")
+    pk.add_argument("--cat", default=None,
+                    help="直接指定分類 ID 跳過詢問 ('-' = 用預設); 省略則互動詢問")
+    pk.add_argument("kiro_args", nargs=argparse.REMAINDER,
+                    help="'--' 之後的參數原樣轉給 Kiro CLI")
+    pk.set_defaults(func=cmd_kiro)
 
     psy = sub.add_parser("sync", help="監看並把 raw session 快照上傳到 Discord (bot 端渲染)")
     psy.set_defaults(func=cmd_sync)
